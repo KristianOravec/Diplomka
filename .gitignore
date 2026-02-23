@@ -1,0 +1,51 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+*.egg
+*.o
+*.a
+*.so
+*.dylib
+bin/
+lib/
+obj/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+output/
+
+# Raw data (large, external)
+raw-data/
+
+# Benchmark results
+*.csv
+!python/*.csv

@@ -1,0 +1,38 @@
+{
+    "comment": "Configuration for C Auto-tuning Evaluator",
+    
+    "simulation": {
+        "monte_carlo_iterations": 100,
+        "curve_limit_max": 2000,
+        "min_tuning_steps": 1,
+        "max_tuning_steps": 3000,
+        "default_fit_start": 10
+    },
+    
+    "curve_fitting": {
+        "lm_iterations": 100,
+        "lm_damping": 0.001,
+        "matrix_singularity_threshold": 1e-10,
+        "min_decay_rate": 0.1,
+        "max_decay_rate": 3.0,
+        "min_scale_factor": 0.001,
+        "initial_decay_rate": 0.5,
+        "initial_scale_factor": 1.0
+    },
+    
+    "random": {
+        "seed": 42,
+        "engine": "mt19937"
+    },
+    
+    "data": {
+        "path": "raw-data/raw-autotuning-data/",
+        "default_column": "Computation duration (us)",
+        "fallback_column": "Kernel duration (us)"
+    },
+    
+    "output": {
+        "path": "output/",
+        "prefix": "benchmark_"
+    }
+}
