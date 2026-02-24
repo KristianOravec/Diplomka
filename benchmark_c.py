@@ -74,8 +74,8 @@ def experiment(file_name):
 
     hist_HW = "680"
     # Full configuration (can be slow)
-    # hw_list = ["680", "750", "1070", "2080"]
-    hw_list = ["680"]
+    hw_list = ["680", "750", "1070", "2080"]
+    # hw_list = ["1070"]
     kernel_run_number_list = ["10000", "10000000"]
     k_values = ["1.0", "0.0", "0.5"]
     overhead_values = ["10000", "1000000"]
@@ -98,7 +98,7 @@ def experiment(file_name):
         overhead = int(overhead_str)
         
         fit_start = 10
-        number_of_tests = 10
+        number_of_tests = 1000
 
         result = run_evaluator(HW, file_name, total_kernel_runs, hist_HW, k, overhead, fit_start, number_of_tests)
 

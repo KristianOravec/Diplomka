@@ -22,8 +22,8 @@ def experiment(file_name):
             writer.writerow(["HW / # of runs / method / overhead","Average extra runtime","Extra runtime deviation","Average GT TS","GT TS deviation","Average estimated TS","Estimated TS deviation","Average miss (tuning steps)"])
 
     hist_HW = "680" # the HW used to set the estimate
-    hw_list = ["680"]
-    # hw_list = ["680", "750", "1070", "2080"]
+    # hw_list = ["1070"]
+    hw_list = ["680", "750", "1070", "2080"]
     kernel_run_number_list = ["10000","10000000"]
 
     k_values = ["1.0","0.0","0.5"] # k: emphasis on regression [0: no regression, 1: regression only, 0 < x < 1: hybrid] ale radsej sa spytaj este Jirku
@@ -52,7 +52,7 @@ def experiment(file_name):
         #overhead = 500000
 
         #parameters: HW, file_name, total_kernel_runs, hist_HW, k = 1, overhead = 0, fit_start = 15, number_of_tests = 1000
-        average_extra_runtime, std_extra_runtime, avg_crystal_ball, std_crystal_ball, avg_estimate, std_estimate, avg_miss = evaluator(HW,file_name,total_kernel_runs, hist_HW, k, overhead, fit_start, 10)
+        average_extra_runtime, std_extra_runtime, avg_crystal_ball, std_crystal_ball, avg_estimate, std_estimate, avg_miss = evaluator(HW,file_name,total_kernel_runs, hist_HW, k, overhead, fit_start, 1000)
  
 
         # Dalej je uz len nejaky exporter do CSV
@@ -95,5 +95,6 @@ def experiment(file_name):
             with open(extra_result_file_name,'a',newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(extrarow)
+
 
 experiment("gemm-reduced_output.csv")

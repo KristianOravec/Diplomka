@@ -74,7 +74,7 @@ static TestResult run_monte_carlo_test(const TuningData* data, uint64_t curve_li
     }
 
     /* Lines 173-181 in Python: budget_estimator.tuning_length_recommendation() call */
-    uint64_t estimate = recommend_tuning_length(default_tuning_steps, tuning_run, curve_limit, NULL, NULL, total_kernel_runs, k, DEFAULT_FIT_START, overhead, hist_a, hist_b);
+    uint64_t estimate = recommend_tuning_length(default_tuning_steps, tuning_run, curve_limit, total_kernel_runs, k, DEFAULT_FIT_START, overhead, hist_a, hist_b);
     
     /* Line 183 in Python: extra_runtime calculation */
     double extra_runtime = 0;
@@ -142,9 +142,7 @@ static uint64_t local_budget_estimation(uint64_t current, uint64_t total, double
  * 4. Updates best_config and best_configs_so_far (lines 57-58 in Python)
  * 5. Returns early if budget < 1 (lines 60-61 in Python)
  */
-uint64_t recommend_tuning_length(uint64_t default_tuning_steps, const double* tuning_run, uint64_t tuning_run_len, const char* HW, const char* file_name, uint64_t total_kernel_runs, double regression_weight, uint64_t fit_start, uint64_t overhead, double hist_a, double hist_b) {
-    (void)HW; (void)file_name;
-    
+uint64_t recommend_tuning_length(uint64_t default_tuning_steps, const double* tuning_run, uint64_t tuning_run_len,  uint64_t total_kernel_runs, double regression_weight, uint64_t fit_start, uint64_t overhead, double hist_a, double hist_b) {    
     /* Lines 28-34 in Python: Initialization */
     uint64_t max_steps = (total_kernel_runs < tuning_run_len) ? total_kernel_runs : tuning_run_len;
     uint64_t budget = max_steps; double best_config = tuning_run[0];
