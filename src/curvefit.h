@@ -15,6 +15,7 @@ extern "C" {
 typedef struct { double a, b, c; } CurveParams;
 void curve_fit(double* x, double* y, uint64_t n, uint64_t fit_start, double* a, double* b, double* c, double hist_a, double hist_b);
 double curve_eval(double x, double a, double b, double c);
+uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current, uint64_t total, double avg_rt, uint64_t overhead);
 #ifdef __cplusplus
 }
 #endif

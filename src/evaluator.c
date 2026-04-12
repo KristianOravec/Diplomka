@@ -43,7 +43,7 @@ typedef struct { uint64_t crystal_idx, estimate; double extra_runtime, miss; } T
  * 7. Computing extra_runtime (line 183 in Python)
  * 8. Recording results (lines 185-188 in Python)
  */
-static TestResult run_monte_carlo_test(const TuningData* data, uint64_t curve_limit, uint64_t total_kernel_runs, uint64_t overhead, double k, double hist_a, double hist_b) {
+static TestResult run_monte_carlo_test(const TuningData* data, uint64_t curve_limit, uint64_t total_kernel_runs, uint64_t overhead, double k, uint64_t default_tuning_steps, uint64_t fit_start, double hist_a, double hist_b) {
     double* tuning_run = malloc(curve_limit * sizeof(double));
     double* best_so_far = malloc(curve_limit * sizeof(double));
     double* tuning_costs = malloc(curve_limit * sizeof(double));
@@ -67,14 +67,8 @@ static TestResult run_monte_carlo_test(const TuningData* data, uint64_t curve_li
     double min_runtime = 1e300; uint64_t crystal_idx = 0;
     for (uint64_t i = 0; i < curve_limit; i++) { double total = tuning_costs[i] + running_costs[i]; if (total < min_runtime) { min_runtime = total; crystal_idx = i; } }
 
-    /* Lines 146-147 in Python: k > 0.0 && k < 1.0 case - get historical_tuning_steps */
-    uint64_t default_tuning_steps = 0;
-    if (k > 0.0 && k < 1.0) {
-        default_tuning_steps = history_run(0, "", total_kernel_runs, overhead, 1);  /* Calls history() in Python */
-    }
-
     /* Lines 173-181 in Python: budget_estimator.tuning_length_recommendation() call */
-    uint64_t estimate = recommend_tuning_length(default_tuning_steps, tuning_run, curve_limit, total_kernel_runs, k, DEFAULT_FIT_START, overhead, hist_a, hist_b);
+    uint64_t estimate = recommend_tuning_length(default_tuning_steps, tuning_run, curve_limit, total_kernel_runs, k, fit_start, overhead, hist_a, hist_b);
     
     /* Line 183 in Python: extra_runtime calculation */
     double extra_runtime = 0;
@@ -85,16 +79,6 @@ static TestResult run_monte_carlo_test(const TuningData* data, uint64_t curve_li
     
     free(tuning_run); free(best_so_far); free(tuning_costs); free(running_costs);
     return res;
-}
-
-/*
- * total_runtime_remaining() - Calculate remaining runtime for given budget
- * 
- * Python equivalent: budget_estimator.total_runtime_remaining() (python/budget_estimator.py lines 21-22)
- * Formula: (average_runtime_so_far + overhead) * x + fitting_function(starting_step+x, a, b, c) * (total_steps-starting_step-x)
- */
-static double total_runtime_remaining(double x, double a, double b, double c, uint64_t start, uint64_t total, double avg_rt, uint64_t overhead) {
-    return (avg_rt + overhead) * x + curve_eval(start + x, a, b, c) * (total - start - x);
 }
 
 /*
@@ -122,8 +106,7 @@ static uint64_t local_budget_estimation(uint64_t current, uint64_t total, double
     double a, b, c; curve_fit(X, best_cfg, best_len, fit_start, &a, &b, &c, hist_a, hist_b); free(X);
     
     /* Lines 96-97 in Python: optimize.minimize to find best budget */
-    double best_budget = 1, best_runtime = total_runtime_remaining(1, a, b, c, current, total, avg_rt, overhead);
-    for (uint64_t bgt = 2; bgt <= total - current; bgt++) { double rt = total_runtime_remaining(bgt, a, b, c, current, total, avg_rt, overhead); if (rt < best_runtime) { best_runtime = rt; best_budget = bgt; } }
+    uint64_t best_budget = minimize_total_runtime(a, b, c, current, total, avg_rt, overhead);
     
     /* Lines 100-103 in Python: Return budget if curve_eval < best_cfg[-1], else 0 */
     uint64_t ib = (uint64_t)(best_budget + 0.5);
@@ -208,14 +191,19 @@ uint64_t history_run(const char* HW, const char* file_name, uint64_t total_kerne
     
     /* Lines 30-50 in Python: Main simulation loop */
     uint64_t historical_optimum = 0;
-    for (uint64_t test = 0; test < number_of_tests; test++) { 
-        TestResult res = run_monte_carlo_test(&data, curve_limit, total_kernel_runs, overhead, 1.0, NO_HISTORICAL_DATA, NO_HISTORICAL_DATA); 
+    if (number_of_tests == 0) {
+        csv_free(&data);
+        return DEFAULT_FIT_START;
+    }
+
+    for (uint64_t test = 0; test < number_of_tests; test++) {
+        TestResult res = run_monte_carlo_test(&data, curve_limit, total_kernel_runs, overhead, 1.0, 0, DEFAULT_FIT_START, NO_HISTORICAL_DATA, NO_HISTORICAL_DATA);
         historical_optimum += res.crystal_idx; 
     }
     
     csv_free(&data);
     /* Line 50 in Python: return round(historical_optimum / number_of_tests) + 1 */
-    return (historical_optimum / number_of_tests) + 1;
+    return (uint64_t)llround((double)historical_optimum / (double)number_of_tests) + 1;
 }
 
 /*
@@ -307,12 +295,18 @@ void evaluator_run(const EvaluatorParams* params, EvaluatorResult* result) {
     double hist_a = NO_HISTORICAL_DATA, hist_b = NO_HISTORICAL_DATA;
     if (params->k == 0.0) { CurveParams cp; get_regression_params(params->hist_HW, params->file_name, params->total_kernel_runs, params->fit_start, params->number_of_tests, &cp); hist_a = cp.a; hist_b = cp.b; }
     
+    /* Lines 146-147 in Python: k > 0.0 && k < 1.0 case - get historical_tuning_steps */
+    uint64_t default_tuning_steps = 0;
+    if (params->k > 0.0 && params->k < 1.0) {
+        default_tuning_steps = history_run(params->hist_HW, params->file_name, params->total_kernel_runs, params->overhead, params->number_of_tests);
+    }
+
     /* Lines 138-148 in Python: Initialize accumulators */
     double sum_extra = 0, sum_crystal = 0, sum_estimate = 0, sum_miss = 0, sum_extra_sq = 0, sum_crystal_sq = 0, sum_estimate_sq = 0;
     
     /* Lines 155-188 in Python: Main Monte Carlo loop over number_of_tests */
     for (uint64_t test = 0; test < params->number_of_tests; test++) {
-        TestResult res = run_monte_carlo_test(&data, curve_limit, params->total_kernel_runs, params->overhead, params->k, hist_a, hist_b);
+        TestResult res = run_monte_carlo_test(&data, curve_limit, params->total_kernel_runs, params->overhead, params->k, default_tuning_steps, params->fit_start, hist_a, hist_b);
         sum_extra += res.extra_runtime; sum_extra_sq += res.extra_runtime * res.extra_runtime;
         sum_crystal += res.crystal_idx + 1; sum_crystal_sq += (res.crystal_idx + 1) * (res.crystal_idx + 1);
         sum_estimate += res.estimate; sum_estimate_sq += res.estimate * res.estimate;
