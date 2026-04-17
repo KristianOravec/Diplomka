@@ -5,56 +5,99 @@
 #include <gsl/gsl_linalg.h>
 #include <lbfgs.h>
 #include "curvefit.h"
+
 static double fitting_function(double x, double a, double b, double c) { return b / pow(x, a) + c; }
+
+static inline void apply_curve_parameter_bounds(gsl_vector* co) {
+    double decay = gsl_vector_get(co, 0);
+
+    if (decay < CURVEFIT_MIN_DECAY_RATE) {
+        decay = CURVEFIT_MIN_DECAY_RATE;
+    } else if (decay > CURVEFIT_MAX_DECAY_RATE) {
+        decay = CURVEFIT_MAX_DECAY_RATE;
+    }
+    gsl_vector_set(co, 0, decay);
+
+    if (gsl_vector_get(co, 1) < CURVEFIT_MIN_SCALE_FACTOR) {
+        gsl_vector_set(co, 1, CURVEFIT_MIN_SCALE_FACTOR);
+    }
+}
+
 static void curve_fit_lm(double* x, double* y, uint64_t n, double* a, double* b, double* c) {
     gsl_matrix* J = gsl_matrix_alloc(n, 3);
+    gsl_matrix* JtJ = gsl_matrix_alloc(3, 3);
     gsl_vector* yv = gsl_vector_alloc(n);
+    gsl_vector* Jty = gsl_vector_alloc(3);
     gsl_vector* co = gsl_vector_alloc(3);
+    gsl_vector* delta = gsl_vector_alloc(3);
+    gsl_permutation* p = gsl_permutation_alloc(3);
     gsl_vector_set(co, 0, *a); gsl_vector_set(co, 1, *b); gsl_vector_set(co, 2, *c);
     for (uint64_t iter = 0; iter < CURVEFIT_LM_ITERATIONS; iter++) {
+        double ai = gsl_vector_get(co, 0);
+        double bi = gsl_vector_get(co, 1);
+        double ci = gsl_vector_get(co, 2);
         for (uint64_t i = 0; i < n; i++) {
-            double xi = x[i], ai = gsl_vector_get(co, 0), bi = gsl_vector_get(co, 1);
-            gsl_matrix_set(J, i, 0, -bi * pow(xi, -ai) * log(xi));
-            gsl_matrix_set(J, i, 1, 1.0 / pow(xi, ai));
+            double xi = x[i];
+            double x_pow_a = pow(xi, ai);
+            double inv_x_pow_a = 1.0 / x_pow_a;
+            double log_x = log(xi);
+            gsl_matrix_set(J, i, 0, -bi * inv_x_pow_a * log_x);
+            gsl_matrix_set(J, i, 1, inv_x_pow_a);
             gsl_matrix_set(J, i, 2, 1.0);
-            gsl_vector_set(yv, i, y[i] - (bi / pow(xi, ai) + gsl_vector_get(co, 2)));
+            gsl_vector_set(yv, i, y[i] - (bi * inv_x_pow_a + ci));
         }
         double lambda = CURVEFIT_LM_DAMPING;
-        gsl_matrix* JtJ = gsl_matrix_alloc(3, 3);
         gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, J, J, 0.0, JtJ);
         for (int i = 0; i < 3; i++) gsl_matrix_set(JtJ, i, i, gsl_matrix_get(JtJ, i, i) * (1.0 + lambda) + lambda);
-        gsl_vector* Jty = gsl_vector_alloc(3);
         gsl_blas_dgemv(CblasTrans, 1.0, J, yv, 0.0, Jty);
-        gsl_permutation* p = gsl_permutation_alloc(3);
         int signum;
         if (gsl_linalg_LU_decomp(JtJ, p, &signum) == 0 && fabs(gsl_linalg_LU_det(JtJ, signum)) > CURVEFIT_MATRIX_DETECTION) {
-            gsl_vector* delta = gsl_vector_alloc(3);
             gsl_linalg_LU_solve(JtJ, p, Jty, delta);
             gsl_vector_add(co, delta);
-            double ca = gsl_vector_get(co, 0);
-            if (ca < CURVEFIT_MIN_DECAY_RATE || ca > CURVEFIT_MAX_DECAY_RATE || gsl_vector_get(co, 1) < CURVEFIT_MIN_SCALE_FACTOR)
-                gsl_vector_set(co, 0, ca < CURVEFIT_MIN_DECAY_RATE ? CURVEFIT_MIN_DECAY_RATE : (ca > CURVEFIT_MAX_DECAY_RATE ? CURVEFIT_MAX_DECAY_RATE : ca));
-            gsl_vector_free(delta);
+            apply_curve_parameter_bounds(co);
         }
-        gsl_permutation_free(p); gsl_vector_free(Jty); gsl_matrix_free(JtJ);
     }
-    *a = gsl_vector_get(co, 0); *b = gsl_vector_get(co, 1); *c = gsl_vector_get(co, 2);
-    gsl_matrix_free(J); gsl_vector_free(yv); gsl_vector_free(co);
+
+    *a = gsl_vector_get(co, 0);
+    *b = gsl_vector_get(co, 1);
+    *c = gsl_vector_get(co, 2);
+
+    gsl_permutation_free(p);
+    gsl_vector_free(delta);
+    gsl_vector_free(co);
+    gsl_vector_free(Jty);
+    gsl_vector_free(yv);
+    gsl_matrix_free(JtJ);
+    gsl_matrix_free(J);
 }
 void curve_fit(double* x, double* y, uint64_t n, uint64_t fit_start, double* a, double* b, double* c, double hist_a, double hist_b) {
     uint64_t fit_n = n - fit_start;
-    if (fit_n == 0) { *a = CURVEFIT_INITIAL_DECAY; *b = CURVEFIT_INITIAL_SCALE; *c = y[n-1]; return; }
+
+    if (fit_n == 0) {
+        *a = CURVEFIT_INITIAL_DECAY;
+        *b = CURVEFIT_INITIAL_SCALE;
+        *c = y[n - 1];
+        return;
+    }
+
     if (hist_a > 0 && hist_b > 0) {
-        *a = hist_a; *b = hist_b;
+        *a = hist_a;
+        *b = hist_b;
+
         double sum = 0;
         for (uint64_t i = fit_start; i < n; i++) sum += y[i] - hist_b / pow(x[i], hist_a);
         *c = sum / (n - fit_start);
         return;
     }
+
     double a_val = CURVEFIT_INITIAL_DECAY, b_val = CURVEFIT_INITIAL_SCALE, c_val = y[n-1];
     curve_fit_lm(x + fit_start, y + fit_start, fit_n, &a_val, &b_val, &c_val);
-    *a = a_val; *b = b_val; *c = c_val;
+
+    *a = a_val;
+    *b = b_val;
+    *c = c_val;
 }
+
 double curve_eval(double x, double a, double b, double c) { return fitting_function(x, a, b, c); }
 
 typedef struct {
@@ -65,6 +108,11 @@ typedef struct {
     double lb;  /* lower bound */
     double ub;  /* upper bound */
 } MinimizationData;
+
+static inline double total_runtime_eval(double x, const MinimizationData* d) {
+    return (d->avg_rt + d->overhead) * x +
+           curve_eval(d->current + x, d->a, d->b, d->c) * (d->total - d->current - x);
+}
 
 /*
  * minimize_total_runtime - Find optimal budget using libLBFGS minimizer
@@ -100,8 +148,7 @@ static lbfgsfloatval_t lbfgs_evaluate(void *data, const lbfgsfloatval_t *x,
     if (x_clamped > d->ub) x_clamped = d->ub;
     
     /* Compute objective: total_runtime_remaining */
-    double result = (d->avg_rt + d->overhead) * x_clamped + 
-                    curve_eval(d->current + x_clamped, d->a, d->b, d->c) * (d->total - d->current - x_clamped);
+    double result = total_runtime_eval(x_clamped, d);
     
     /* Compute gradient numerically (central differences) */
     double eps = 1e-8;
@@ -110,12 +157,11 @@ static lbfgsfloatval_t lbfgs_evaluate(void *data, const lbfgsfloatval_t *x,
     double x_minus = x_clamped - eps;
     if (x_minus < d->lb) x_minus = d->lb;
     
-    double f_plus = (d->avg_rt + d->overhead) * x_plus + 
-                    curve_eval(d->current + x_plus, d->a, d->b, d->c) * (d->total - d->current - x_plus);
-    double f_minus = (d->avg_rt + d->overhead) * x_minus + 
-                     curve_eval(d->current + x_minus, d->a, d->b, d->c) * (d->total - d->current - x_minus);
-    
-    g[0] = (f_plus - f_minus) / (x_plus - x_minus);
+    if (g) {
+        double f_plus = total_runtime_eval(x_plus, d);
+        double f_minus = total_runtime_eval(x_minus, d);
+        g[0] = (f_plus - f_minus) / (x_plus - x_minus);
+    }
     
     return result;
 }
@@ -137,11 +183,11 @@ uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
     /* For small budgets, use exhaustive search (faster and reliable) */
     if (max_budget <= 200) {
         MinimizationData data = {a, b, c, current, total, avg_rt, overhead, 1.0, (double)max_budget};
-        lbfgsfloatval_t fx = lbfgs_evaluate(&data, (lbfgsfloatval_t[]){1.0}, NULL, 1, 0.0);
+        lbfgsfloatval_t fx = total_runtime_eval(1.0, &data);
         uint64_t best_budget = 1;
         lbfgsfloatval_t best_fx = fx;
         for (uint64_t bgt = 2; bgt <= max_budget; bgt++) {
-            fx = lbfgs_evaluate(&data, (lbfgsfloatval_t[]){(lbfgsfloatval_t)bgt}, NULL, 1, 0.0);
+            fx = total_runtime_eval((double)bgt, &data);
             if (fx < best_fx) {
                 best_fx = fx;
                 best_budget = bgt;
@@ -172,6 +218,7 @@ uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
     /* Run optimization */
     lbfgsfloatval_t fx;
     int ret = lbfgs(1, x, &fx, lbfgs_evaluate, lbfgs_progress, &data, &param);
+    (void)ret;
     
     /* Clamp result to valid range */
     uint64_t opt_result = (uint64_t)(x[0] + 0.5);

@@ -27,7 +27,6 @@ typedef struct {
 void evaluator_run(const EvaluatorParams* params, EvaluatorResult* result);
 uint64_t history_run(const char* HW, const char* file_name, uint64_t total_kernel_runs, uint64_t overhead, uint64_t number_of_tests);
 void get_regression_params(const char* HW, const char* file_name, uint64_t total_kernel_runs, uint64_t fit_start, uint64_t number_of_tests, CurveParams* params);
-// struct to-do + inicializacia
 uint64_t recommend_tuning_length(uint64_t default_tuning_steps, const double* tuning_run, uint64_t tuning_run_len, uint64_t total_kernel_runs, double regression_weight, uint64_t fit_start, uint64_t overhead, double hist_a, double hist_b);
 #ifdef __cplusplus
 }
