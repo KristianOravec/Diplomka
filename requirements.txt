@@ -1,0 +1,12 @@
+Ovladanie 
+
+- Viacej druhov kernelov (interny storage) (+ daj historicke data (optional))
+
+Push -> tu mas udaje, pustil som kernel a takto dopadol
+Query -> ako dlho tento kernel ladit ked ho chcem spustit X-krat
+
+pustis kernel, zistis vysledok (ako dopadol kernel), spytas sa kolkokrat pustit autotuning, zas pustis kernel a zas sa spytas kolkokrat pustit kernel
+
+
+Test -> napis si jednodussi evaluator a porovnaj s Python Imple 
+

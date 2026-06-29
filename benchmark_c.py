@@ -53,6 +53,7 @@ def run_evaluator(HW, file_name, total_kernel_runs, hist_HW, k, overhead, fit_st
         fit_start=fit_start,
         number_of_tests=number_of_tests
     )
+
     result = EvaluatorResult()
     lib.evaluator_run(ctypes.byref(params), ctypes.byref(result))
     return result
@@ -87,8 +88,11 @@ def experiment(file_name):
                 for d in overhead_values:
                     benchmark = file_name.replace("_output.csv", "")
                     if os.path.exists(DATA_PATH + benchmark + "/" + a + "-" + file_name):
+                        print(DATA_PATH + benchmark + "/" + a + "-" + file_name)
                         hw_kernel_combinations.append([a, b, c, d])
 
+    print("e")
+    print(hw_kernel_combinations)
     start_time = time.time()
 
     for hw_kernel_combination in hw_kernel_combinations:
@@ -141,4 +145,6 @@ def experiment(file_name):
                 writer = csv.writer(f)
                 writer.writerow(extrarow)
 
+
+print("hello")
 experiment("gemm-reduced_output.csv")

@@ -12,11 +12,17 @@ extern "C" {
 #define CURVEFIT_MIN_SCALE_FACTOR 0.001
 #define CURVEFIT_INITIAL_DECAY 0.5
 #define CURVEFIT_INITIAL_SCALE 1.0
-typedef struct { double a, b, c; } CurveParams;
-void curve_fit(double* x, double* y, uint64_t n, uint64_t fit_start, double* a, double* b, double* c, double hist_a, double hist_b);
+typedef struct {
+    double a, b, c;
+} CurveParams;
+void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
+               double *b, double *c, double hist_a, double hist_b);
 double curve_eval(double x, double a, double b, double c);
-uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current, uint64_t total, double avg_rt, uint64_t overhead);
+uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
+                                uint64_t total, double avg_rt,
+                                uint64_t overhead);
 #ifdef __cplusplus
 }
+
 #endif
 #endif
