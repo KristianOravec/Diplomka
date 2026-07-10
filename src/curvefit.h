@@ -4,6 +4,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Levenberg-Marquardt fit constants */
 #define CURVEFIT_LM_ITERATIONS 100
 #define CURVEFIT_LM_DAMPING 0.001
 #define CURVEFIT_MATRIX_DETECTION 1e-10
@@ -12,6 +14,8 @@ extern "C" {
 #define CURVEFIT_MIN_SCALE_FACTOR 0.001
 #define CURVEFIT_INITIAL_DECAY 0.5
 #define CURVEFIT_INITIAL_SCALE 1.0
+
+/* Holds the three fitted curve parameters of f(x) = b/x^a + c. */
 typedef struct {
     double a, b, c;
 } CurveParams;

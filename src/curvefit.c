@@ -7,9 +7,12 @@
 
 /*
     pred(x) = 1/x^a · b + c (Section 2.1 / 3.1)
-    a: decay rate
-    b: initial scale
-    c: floor
+
+    [in] a : decay rate
+    [in] b : initial scale
+    [in] c : floor
+
+    returns: the predicted best-so-far runtime at step x.
     */
 static double fitting_function(double x, double a, double b, double c) {
     return b / pow(x, a) + c;
@@ -30,6 +33,17 @@ static inline void apply_curve_parameter_bounds(gsl_vector *co) {
     }
 }
 
+/*
+    Fits a,b,c so f(x[i]) ~ y[i] for all i, by iterative least squares.
+    [in]     x : array of x-values (step numbers), length n
+    [in]     y : array of y-values (measured best-so-far runtimes), length n.
+    [in]     n : number of points.
+    [in/out] a : decay -- pass a starting guess in; fitted value out
+    [in/out] b : scale -- starting guess in; fitted value out
+    [in/out] c : floor -- starting guess in; fitted value out
+
+    returns    : nothing (a, b, c)
+*/
 static void curve_fit_lm(double *x, double *y, uint64_t n, double *a, double *b,
                          double *c) {
     gsl_matrix *J = gsl_matrix_alloc(n, 3);
@@ -83,10 +97,29 @@ static void curve_fit_lm(double *x, double *y, uint64_t n, double *a, double *b,
     gsl_matrix_free(JtJ);
     gsl_matrix_free(J);
 }
+
+/*
+    [in] x         : x-values (step numbers), length n.
+    [in] y         : y-values (best-so-far runtimes), length n
+    [in] n         : number of points
+    [in] fit_start : index to begin fitting from
+    [out] a,b,c     : the fitted curve parameters.
+    [in]  hist_a    : historical decay, or NO_HISTORICAL_DATA (-1) for "none".
+    [in]  hist_b    : historical scale, or -1 for "none".
+
+    MODES:
+      hist_a<0 & hist_b<0 -> fit all three a,b,c live      (k=1 live).
+      hist_a>0 & hist_b>0 -> freeze a,b to the historical values, fit only c
+                             (k=0 historical: the "frozen curve").
+    returns: nothing (results via a,b,c).
+*/
 void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
                double *b, double *c, double hist_a, double hist_b) {
+    /* How many points we'll actually fit. */
     uint64_t fit_n = n - fit_start;
 
+    /* MODE 1 -- nothing to fit (fit_start == n). Return sensible defaults and
+     * use the last observed value as the floor c. */
     if (fit_n == 0) {
         *a = CURVEFIT_INITIAL_DECAY;
         *b = CURVEFIT_INITIAL_SCALE;
@@ -94,6 +127,9 @@ void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
         return;
     }
 
+    /* MODE 2 -- historical parameters provided: reuse a and b, only solve for
+     * c. c is chosen as the average vertical offset between the data and the
+     * fixed historical curve b/x^a over the fitted range. */
     if (hist_a > 0 && hist_b > 0) {
         *a = hist_a;
         *b = hist_b;
@@ -105,6 +141,8 @@ void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
         return;
     }
 
+    /* MODE 3 -- full fit from scratch using Levenberg-Marquardt.
+     * Start from default guesses; c starts at the last observed value. */
     double a_val = CURVEFIT_INITIAL_DECAY, b_val = CURVEFIT_INITIAL_SCALE,
            c_val = y[n - 1];
     curve_fit_lm(x + fit_start, y + fit_start, fit_n, &a_val, &b_val, &c_val);
@@ -214,6 +252,11 @@ static int lbfgs_progress(void *data, const lbfgsfloatval_t *x,
     return 0;
 }
 
+/* -----------------------------------------------------------------------------
+ * find the budget x (number of extra tuning steps) that minimises
+ * total_runtime_eval, returned as a whole number >= 1.
+ * ---------------------------------------------------------------------------
+ */
 uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
                                 uint64_t total, double avg_rt,
                                 uint64_t overhead) {

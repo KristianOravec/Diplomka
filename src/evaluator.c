@@ -1,25 +1,3 @@
-/*
- * C Implementation of Evaluator and Budget Estimator
- *
- * Python equivalents:
- * - evaluator() in python/evaluator.py -> evaluator_run() in this file
- * - history() in python/evaluator.py -> history_run() in this file
- * - get_history_regression_parameters() in python/evaluator.py ->
- * get_regression_params() in this file
- * - tuning_length_recommendation() in python/budget_estimator.py ->
- * recommend_tuning_length() in this file
- * - local_budget_estimation() in python/budget_estimator.py ->
- * local_budget_estimation() in this file
- * - total_runtime_remaining() in python/budget_estimator.py ->
- * total_runtime_remaining() in this file
- *
- * KNOWN DIFFERENCES FROM PYTHON:
- * 1. DEFAULT_FIT_START: Python default is 15, C uses 10 (evaluator.h)
- * 2. Curve fitting: Python uses scipy.optimize.curve_fit with bounds,
- *    C uses GSL Levenberg-Marquardt with different constraints
- * 3. Some numerical precision differences may occur due to different libraries
- */
-
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +29,10 @@ typedef struct {
     double miss;          /* |crystal_idx - estimate| */
 } TestResult;
 
+/* Per-thread scratch buffers allocated once and reused across many tests so we
+   don't malloc/free inside the hot loop. tuning_run holds one synthetic run;
+   best_configs holds the best-so-far curve the estimator fits to.
+*/
 typedef struct {
     double *tuning_run;
     double *best_configs;
@@ -143,7 +125,11 @@ static void build_data_path(const char *hw, const char *file_name, char *path,
     snprintf(path, path_len, "raw-data/raw-autotuning-data/%s/%s-%s", benchmark,
              safe_hw, safe_file_name);
 }
-
+/*
+  get_x_cache -- returns a shared array [0, 1, 2, ..., CURVE_LIMIT_MAX-1] of
+  doubles, used as the x-axis (step numbers) when fitting curves. Built once on
+  first call and reused forever (the `static` locals persist across calls).
+*/
 static double *get_x_cache(void) {
     static double x_cache[CURVE_LIMIT_MAX];
     static int initialized = 0;
@@ -158,6 +144,9 @@ static double *get_x_cache(void) {
     return x_cache;
 }
 
+/*
+    workspace_init -- allocate the 2 scratch buffers for one thread's workspace.
+*/
 static int workspace_init(MonteCarloWorkspace *ws, uint64_t curve_limit) {
     ws->tuning_run = NULL;
     ws->best_configs = NULL;
@@ -174,23 +163,37 @@ static void workspace_free(MonteCarloWorkspace *ws) {
     ws->best_configs = NULL;
 }
 
+/*
+    run_history_trial -- ONE trial of the "history" simulation
+
+    Draws curve_limit samples, tracks the best-so-far and cumulative cost, and
+    returns the step index where the COST MODEL is minimised (the oracle stop).
+    This is just the oracle half of a Monte Carlo test, with no estimator
+   involved.
+*/
 static uint64_t run_history_trial(const TuningData *data, uint64_t curve_limit,
                                   uint64_t total_kernel_runs, uint64_t overhead,
                                   uint64_t *rng_state) {
     double cumsum = 0;
-    double best = 0;
+    double best = 0; /* best (min) runtime so far */
     double min_runtime = LARGE_RUNTIME_SENTINEL;
     uint64_t crystal_idx = 0;
 
     for (uint64_t i = 0; i < curve_limit; i++) {
+        /* Draw a random runtime from the data (bootstrap sampling). */
         double sample =
             data->data[random_index_from_state(data->size, rng_state)];
         cumsum += sample;
+        /* Update best-so-far: on the first step, or whenever we beat the
+         * record. */
         if (i == 0 || sample < best)
             best = sample;
 
+        /* Evaluate the cost model at this step. */
         double total = total_runtime_for_step(cumsum, i, overhead, best,
                                               total_kernel_runs);
+        /* Track the step with the lowest cost = the oracle's best stopping
+         * point. */
         if (total < min_runtime) {
             min_runtime = total;
             crystal_idx = i;
@@ -200,21 +203,9 @@ static uint64_t run_history_trial(const TuningData *data, uint64_t curve_limit,
 }
 
 /*
- * run_monte_carlo_test() - Main Monte Carlo test loop
- *
- * Python equivalent: main loop in evaluator() function (python/evaluator.py
- * lines 155-188)
- *
- * Performs a single iteration of:
- * 1. Sampling tuning_run from data (equivalent to lines 157 in Python)
- * 2. Computing best_so_far (lines 158-162 in Python)
- * 3. Computing tuning_costs with cumsum + overhead (lines 164-166 in Python)
- * 4. Computing running_costs (lines 167-169 in Python)
- * 5. Computing total_runtimes and finding crystal_ball minimum (lines 170-171
- * in Python)
- * 6. Calling budget_estimator to get estimate (lines 173-181 in Python)
- * 7. Computing extra_runtime (line 183 in Python)
- * 8. Recording results (lines 185-188 in Python)
+    run_monte_carlo_test() - Main Monte Carlo test loop
+    run_monte_carlo_test -- ONE full Monte Carlo test: build a synthetic run,
+    ask the estimator where to stop, compute the oracle stop, and score the gap.
  */
 static TestResult
 run_monte_carlo_test(const TuningData *data, uint64_t curve_limit,
@@ -222,27 +213,27 @@ run_monte_carlo_test(const TuningData *data, uint64_t curve_limit,
                      uint64_t default_tuning_steps, uint64_t fit_start,
                      double hist_a, double hist_b, MonteCarloWorkspace *ws,
                      uint64_t *rng_state) {
+    /* Use this thread's reusable scratch buffer for the synthetic run. */
     double *tuning_run = ws->tuning_run;
 
-    /* Line 157 in Python: tuning_run = all_config_runtimes.sample(n =
-     * curve_limit).values */
+    /* Build the syntethic run: curve_limit random draws from the real data. */
     for (uint64_t i = 0; i < curve_limit; i++)
         tuning_run[i] =
             data->data[random_index_from_state(data->size, rng_state)];
 
-    /* Lines 173-181 in Python: budget_estimator.tuning_length_recommendation()
-     * call */
+    /* Ask the estimator where it WOULD stop on this run. (Done first because
+     * the estimator needs the full tuning_run array, which we just filled.) */
     uint64_t estimate = recommend_tuning_length_impl(
         default_tuning_steps, tuning_run, curve_limit, total_kernel_runs, k,
         fit_start, overhead, hist_a, hist_b, ws->best_configs);
 
-    /* Lines 158-171 in Python: best_so_far, tuning_costs, running_costs,
-     * crystal_ball */
+    /* Now compute the ORACLE stop by scanning the same run. */
     double cumsum = 0;
     double best = 0;
     double min_runtime = LARGE_RUNTIME_SENTINEL;
     uint64_t crystal_idx = 0;
     double estimate_runtime = 0;
+    /* Only meaningful if the estimator's stop index is within the run. */
     int has_estimate_runtime = (estimate < curve_limit);
 
     for (uint64_t i = 0; i < curve_limit; i++) {
@@ -251,28 +242,32 @@ run_monte_carlo_test(const TuningData *data, uint64_t curve_limit,
         if (i == 0 || sample < best)
             best = sample;
 
+        /* Cost model at step i. */
         double total = total_runtime_for_step(cumsum, i, overhead, best,
                                               total_kernel_runs);
-
+        /* Track the oracle's minimum-cost step. */
         if (total < min_runtime) {
             min_runtime = total;
             crystal_idx = i;
         }
 
+        /* When we reach the estimator's chosen step, record its cost so we can
+         * compare it to the oracle's minimum. */
         if (has_estimate_runtime && i == estimate) {
             estimate_runtime = total;
         }
     }
 
-    /* Line 183 in Python: extra_runtime calculation */
+    /* extra_runtime = how much worse the estimator's stop is than optimal,
+     * as a fraction. 0 means the estimator matched the oracle's cost. Guard
+     * against divide-by-zero with the min_runtime > 0 check. */
     double extra_runtime = 0;
     if (has_estimate_runtime) {
         extra_runtime =
             min_runtime > 0 ? estimate_runtime / min_runtime - 1.0 : 0;
     }
 
-    /* Lines 185-188 in Python: Recording crystal_balls, extra_runtimes,
-     * estimates, misses */
+    /* Package up the four numbers for this test. miss = |oracle - estimate|. */
     TestResult res = {crystal_idx, estimate, extra_runtime,
                       fabs((double)crystal_idx - (double)estimate)};
 

@@ -133,6 +133,12 @@ uint64_t tuner_steps_taken(const KernelHandle* h);   /* samples pushed so far */
 double   tuner_best_so_far(const KernelHandle* h);   /* best runtime seen */
 const char* tuner_debug_name(const KernelHandle* h); /* the debug label, or "" */
 
+/* Fresh per-step recommendation given the current history, ignoring the latched
+ * countdown/stop. Used by behavioral probes (overtune/undertune) to ask "what
+ * would you advise right now?" regardless of whether the kernel already stopped.
+ * Returns 0 if no further improvement is predicted. */
+uint64_t tuner_raw_recommendation(const KernelHandle* h);
+
 /* NOTE ON set_total_runs + HYBRID MODE:
  * The historical backstop O_hist is itself X-dependent (the paper's 4000x4000 ->
  * 2000x2000 example). For LIVE and HISTORICAL modes, changing X is fully handled
