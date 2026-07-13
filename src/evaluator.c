@@ -1,3 +1,13 @@
+/* =============================================================================
+ * evaluator.c  -- implementation of the batch Monte Carlo evaluator and helpers.
+ *
+ * Implements evaluator_run (average metrics over many trials), history_run
+ * (historical optimum O_hist), get_regression_params (historical curve fit), and
+ * recommend_tuning_length (the batch stopping rule the deployed API mirrors).
+ * Public parameter docs live in evaluator.h; the comments here explain the
+ * internals (sampling, the Monte Carlo loop, the cost model).
+ * ============================================================================= */
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,3 +1,12 @@
+/* =============================================================================
+ * curvefit.c  -- curve fitting (Levenberg-Marquardt) and total-runtime
+ *                minimisation (exhaustive scan + libLBFGS).
+ *
+ * Implements the primitives declared in curvefit.h. Public parameter docs live
+ * in the header; the comments here explain the internals: the LM iteration, the
+ * three fit modes, and the shared minimiser core behind the batch/tuner wrappers.
+ * ============================================================================= */
+
 #include "curvefit.h"
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
@@ -252,27 +261,41 @@ static int lbfgs_progress(void *data, const lbfgsfloatval_t *x,
     return 0;
 }
 
-/* -----------------------------------------------------------------------------
- * find the budget x (number of extra tuning steps) that minimises
+/* =============================================================================
+ * minimise_core -- the actual minimiser, shared by both public variants.
+ *
+ * Finds the budget x (number of extra tuning steps) that minimises
  * total_runtime_eval, returned as a whole number >= 1.
+ *
+ * The per-step cost is passed as a single combined `step_cost`; the objective
+ * (total_runtime_eval) then uses (avg_rt + overhead) with overhead == 0, so
+ * `step_cost` IS the per-step cost. The two public wrappers below differ only in
+ * how they build this value:
+ *   - batch  : step_cost = avg_rt + overhead   (overhead is a separate constant)
+ *   - tuner  : step_cost = measured total       (overhead already folded in)
+ * Keeping one core guarantees the two paths stay numerically identical.
+ *
+ * Strategy: exhaustive scan for small ranges (<=200: fast and exact), libLBFGS
+ * for larger ranges (O(log n) rather than O(n)).
  * ---------------------------------------------------------------------------
  */
-uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
-                                uint64_t total, double avg_rt,
-                                uint64_t overhead) {
+static uint64_t minimise_core(double a, double b, double c, uint64_t current,
+                              uint64_t total, double step_cost) {
     uint64_t max_budget = total - current;
     if (max_budget < 1)
-        return 1; /* Edge case: no room for budget */
+        return 1; /* no room to tune further */
 
-    /* For small budgets, use exhaustive search (faster and reliable) */
+    /* Bundle the objective's inputs. overhead is 0 because step_cost already
+     * carries the full per-step cost. */
+    MinimizationData data = {a,         b,   c,   current, total,
+                             step_cost, 0,   1.0, (double)max_budget};
+
+    /* --- small range: exhaustive search (exact, and cheap here) --- */
     if (max_budget <= 200) {
-        MinimizationData data = {
-            a, b, c, current, total, avg_rt, overhead, 1.0, (double)max_budget};
-        lbfgsfloatval_t fx = total_runtime_eval(1.0, &data);
+        lbfgsfloatval_t best_fx = total_runtime_eval(1.0, &data);
         uint64_t best_budget = 1;
-        lbfgsfloatval_t best_fx = fx;
         for (uint64_t bgt = 2; bgt <= max_budget; bgt++) {
-            fx = total_runtime_eval((double)bgt, &data);
+            lbfgsfloatval_t fx = total_runtime_eval((double)bgt, &data);
             if (fx < best_fx) {
                 best_fx = fx;
                 best_budget = bgt;
@@ -281,37 +304,40 @@ uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
         return best_budget;
     }
 
-    MinimizationData data = {a,      b,        c,   current,           total,
-                             avg_rt, overhead, 1.0, (double)max_budget};
-
-    /* Initialize parameters - match scipy L-BFGS-B defaults */
+    /* --- large range: libLBFGS, tuned to resemble scipy's L-BFGS-B --- */
     lbfgs_parameter_t param;
     lbfgs_parameter_init(&param);
+    param.delta = 1e-5;         /* gradient-norm convergence (~ scipy pgtol) */
+    param.ftol = 2.22e-9;       /* function-change tolerance (~ scipy ftol) */
+    param.max_iterations = 100; /* iteration cap */
+    param.max_linesearch = 20;  /* line-search cap (default) */
 
-    /* Set parameters similar to scipy:
-     * - delta: convergence on gradient norm (similar to PGTOL, default 1e-5)
-     * - ftol: function change tolerance (default 1e-4)
-     * - max_iterations: max iterations */
-    param.delta = 1e-5;         /* ≈ pgtol (1e-5) */
-    param.ftol = 2.22e-9;       /* ≈ ftol (2.22e-9) */
-    param.max_iterations = 100; /* Limit iterations */
-    param.max_linesearch = 20;  /* Default */
-
-    /* Initial guess - start at 1 (like scipy) */
-    lbfgsfloatval_t x[1];
-    x[0] = 1.0;
-
-    /* Run optimization */
+    lbfgsfloatval_t x[1] = {1.0}; /* initial guess, start at 1 (like scipy) */
     lbfgsfloatval_t fx;
     int ret = lbfgs(1, x, &fx, lbfgs_evaluate, lbfgs_progress, &data, &param);
     (void)ret;
 
-    /* Clamp result to valid range */
+    /* round + clamp into [1, max_budget] */
     uint64_t opt_result = (uint64_t)(x[0] + 0.5);
     if (opt_result < 1)
         opt_result = 1;
     if (opt_result > max_budget)
         opt_result = max_budget;
-
     return opt_result;
+}
+
+/* BATCH variant: overhead supplied separately; combine it with avg_rt. Used by
+ * the batch evaluator / Python-comparison path (temporary validation scaffold). */
+uint64_t minimize_total_runtime(double a, double b, double c, uint64_t current,
+                                uint64_t total, double avg_rt,
+                                uint64_t overhead) {
+    return minimise_core(a, b, c, current, total, avg_rt + (double)overhead);
+}
+
+/* TUNER variant: step_cost is the measured total runtime, which already includes
+ * overhead -- so pass it straight through. Used by the deployed push/query path. */
+uint64_t minimize_total_runtime_tuner(double a, double b, double c,
+                                      uint64_t current, uint64_t total,
+                                      double step_cost) {
+    return minimise_core(a, b, c, current, total, step_cost);
 }

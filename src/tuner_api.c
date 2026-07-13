@@ -14,13 +14,49 @@
  */
 
 #include "tuner_api.h"
-#include "curvefit.h" /* curve_fit, minimize_total_runtime, curve_eval, CurveParams */
+#include "curvefit.h" /* curve_fit, minimize_total_runtime_tuner, curve_eval */
 #include "evaluator.h" /* CURVE_LIMIT_MAX, NO_HISTORICAL_DATA, history_run, get_regression_params */
 #include <stdlib.h>
 #include <string.h>
 
 /* Max length (including the '\0' terminator) of the optional debug name. */
 #define TUNER_NAME_CAP 128
+
+/* -----------------------------------------------------------------------------
+ * DEBUG PRINTS
+ *
+ * Compile with -DTUNER_DEBUG=1 to turn on tracing; leave it off (the default)
+ * and every TUNER_DBG(...) call vanishes at compile time -- zero runtime cost.
+ *
+ *   gcc ... -DTUNER_DEBUG=1 ...       # traces on
+ *   gcc ...                           # traces off (production)
+ *
+ * Traces go to stderr (so they don't mix into a program's stdout results) and
+ * are prefixed with the kernel's debug_name so multiple kernels are
+ * distinguishable. They report the per-step budget decision (fresh estimate,
+ * new-best resets, countdown, stop), which is what you need to see WHY the
+ * estimator stopped where it did -- and, in a harness, to confirm the sampled
+ * inputs are actually changing from step to step.
+ * ---------------------------------------------------------------------------
+ */
+#ifndef TUNER_DEBUG
+#define TUNER_DEBUG 0
+#endif
+
+#if TUNER_DEBUG
+#include <stdio.h>
+/* name: the kernel's debug label (or "?"); fmt/...: printf-style message. */
+#define TUNER_DBG(name, ...)                                                   \
+    do {                                                                       \
+        fprintf(stderr, "[tuner:%s] ", (name) && *(name) ? (name) : "?");      \
+        fprintf(stderr, __VA_ARGS__);                                          \
+        fprintf(stderr, "\n");                                                 \
+    } while (0)
+#else
+#define TUNER_DBG(name, ...)                                                   \
+    do {                                                                       \
+    } while (0)
+#endif
 
 struct KernelHandle {
     char debug_name[TUNER_NAME_CAP];
@@ -73,17 +109,23 @@ static const double *tuner_x_axis(void) {
     return x;
 }
 
+/* One per-step decision: fit the curve to the best-so-far history, find the
+ * cost-minimising extra budget, and return it -- or 0 if the curve predicts no
+ * further improvement.
+ *
+ *   step_cost = the measured per-step cost (total runtime, overhead already
+ *               included). Passed straight to the tuner minimiser, which takes
+ *               no separate overhead argument. */
 static uint64_t tuner_local_budget(uint64_t current, uint64_t total,
-                                   double avg_rt, double *best_cfg,
+                                   double step_cost, double *best_cfg,
                                    uint64_t best_len, uint64_t fit_start,
-                                   uint64_t overhead, double hist_a,
-                                   double hist_b) {
+                                   double hist_a, double hist_b) {
     const double *x = tuner_x_axis();
     double a, b, c;
     curve_fit((double *)x, best_cfg, best_len, fit_start, &a, &b, &c, hist_a,
               hist_b);
     uint64_t best_budget =
-        minimize_total_runtime(a, b, c, current, total, avg_rt, overhead);
+        minimize_total_runtime_tuner(a, b, c, current, total, step_cost);
     uint64_t ib = (uint64_t)(best_budget + 0.5);
     return (curve_eval((double)current + ib, a, b, c) < best_cfg[best_len - 1])
                ? ib
@@ -148,6 +190,14 @@ KernelHandle *initiate_kernel(const KernelConfig *cfg, const char *debug_name,
                                                          : CURVE_LIMIT_MAX;
     h->stopped = 0;
 
+    TUNER_DBG(h->debug_name,
+              "init mode=%d k=%.2f total_runs=%llu fit_start=%llu "
+              "hist_a=%.4f hist_b=%.4f O_hist=%llu start_budget=%llu",
+              (int)h->mode, h->k, (unsigned long long)h->total_kernel_runs,
+              (unsigned long long)h->fit_start, h->hist_a, h->hist_b,
+              (unsigned long long)h->hist_optimal_steps,
+              (unsigned long long)h->budget);
+
     if (out_status)
         *out_status = TUNER_OK;
     return h;
@@ -191,10 +241,15 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
         h->best_len = 1;
         h->step = 0;
         h->seeded = 1;
+        TUNER_DBG(h->debug_name,
+                  "push step=0 (seed) kernel=%.1f total=%.1f budget=%llu",
+                  kernel_time_us, total_time_us, (unsigned long long)h->budget);
         return;
     }
 
     uint64_t i = h->step + 1;
+    TUNER_DBG(h->debug_name, "push step=%llu kernel=%.1f total=%.1f",
+              (unsigned long long)i, kernel_time_us, total_time_us);
     /* running means: kernel time (for the curve) and total time (for cost) */
     h->avg_runtime =
         (h->avg_runtime * (double)i + kernel_time_us) / (double)(i + 1);
@@ -212,14 +267,13 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
         uint64_t default_tuning_steps =
             (h->mode == TUNER_MODE_HYBRID) ? h->hist_optimal_steps : 0;
 
-        /* COST MODEL CHANGE: the measured total runtime already includes
-         * overhead, so we pass avg_total_runtime as the per-step cost and
-         * overhead = 0 (minimize_total_runtime uses (avg_rt + overhead) as the
-         * step cost). This makes overhead MEASURED per step rather than a fixed
-         * constant. */
+        /* Per-step cost is the measured TOTAL runtime (overhead already folded
+         * in), so we hand avg_total_runtime straight to the tuner minimiser --
+         * no separate overhead term. This is what makes overhead MEASURED per
+         * step rather than a fixed constant. */
         uint64_t new_budget = tuner_local_budget(
             i, h->total_kernel_runs, h->avg_total_runtime, h->best_configs,
-            h->best_len, h->fit_start, /*overhead=*/0, h->hist_a, h->hist_b);
+            h->best_len, h->fit_start, h->hist_a, h->hist_b);
 
         if (default_tuning_steps > 0) {
             double rw = (double)i / (double)default_tuning_steps;
@@ -233,9 +287,21 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
         }
 
         if (is_new_best) {
-            h->budget = new_budget;
+            h->budget =
+                new_budget; /* new best -> re-commit to fresh estimate */
+            TUNER_DBG(h->debug_name,
+                      "  new_best=%.1f -> budget reset to %llu (est=%llu)",
+                      kernel_time_us, (unsigned long long)h->budget,
+                      (unsigned long long)new_budget);
         } else if (new_budget < h->budget) {
-            h->budget = new_budget;
+            h->budget = new_budget; /* estimate shrank -> shrink budget */
+            TUNER_DBG(h->debug_name, "  budget shrunk to %llu (est=%llu)",
+                      (unsigned long long)h->budget,
+                      (unsigned long long)new_budget);
+        } else {
+            TUNER_DBG(
+                h->debug_name, "  budget ticked to %llu (est=%llu, no reset)",
+                (unsigned long long)h->budget, (unsigned long long)new_budget);
         }
     }
 
@@ -245,8 +311,12 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
     if (h->best_len < CURVE_LIMIT_MAX)
         h->best_configs[h->best_len++] = h->best_config;
 
-    if (h->budget < 1)
+    if (h->budget < 1) {
+        if (!h->stopped)
+            TUNER_DBG(h->debug_name, "  STOP at step=%llu (budget exhausted)",
+                      (unsigned long long)i);
         h->stopped = 1;
+    }
 }
 
 /* ---- query (stateless per-call) ---- */
@@ -294,7 +364,7 @@ uint64_t tuner_raw_recommendation(const KernelHandle *h) {
     uint64_t nb =
         tuner_local_budget(i, h->total_kernel_runs, h->avg_total_runtime,
                            (double *)h->best_configs, h->best_len, h->fit_start,
-                           /*overhead=*/0, h->hist_a, h->hist_b);
+                           h->hist_a, h->hist_b);
 
     if (default_tuning_steps > 0) {
         double rw = (double)i / (double)default_tuning_steps;
