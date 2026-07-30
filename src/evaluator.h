@@ -2,11 +2,12 @@
  * evaluator.h  -- top-level estimator interface (shared with the Python ctypes
  *                 caller during validation)
  *
- * Declares the batch Monte Carlo evaluator, the historical-data helpers, and the
- * batch budget recommender, plus the input/output structs shared across the
+ * Declares the batch Monte Carlo evaluator, the historical-data helpers, and
+ * the batch budget recommender, plus the input/output structs shared across the
  * C/Python boundary. Detailed parameter documentation lives here in the header
  * (the contract); evaluator.c holds the implementation notes.
- * ============================================================================= */
+ * =============================================================================
+ */
 #ifndef EVALUATOR_H
 #define EVALUATOR_H
 
@@ -18,8 +19,9 @@ extern "C" {
 #endif
 
 /* ---- constants ---- */
-#define CURVE_LIMIT_MAX 2000    /* hard cap on simulated run length / curve size */
-#define DEFAULT_FIT_START 15    /* fallback fit-start (NOTE: tuner uses 10) */
+#define CURVE_LIMIT_MAX 2000 /* hard cap on simulated run length / curve size  \
+                              */
+#define DEFAULT_FIT_START 15 /* fallback fit-start (NOTE: tuner uses 10) */
 #define NO_HISTORICAL_DATA -1.0 /* sentinel: "no historical a/b supplied" */
 
 /* -----------------------------------------------------------------------------
@@ -30,12 +32,13 @@ extern "C" {
  *   HW                : [in] hardware id for the MAIN data, e.g. "1070".
  *   file_name         : [in] data file, e.g. "gemm-reduced_output.csv".
  *   total_kernel_runs : [in] #E, how many times the final config will run.
- *   hist_HW           : [in] hardware id for the HISTORICAL data (k=0 / hybrid).
- *   k                 : [in] estimator variant: 1=live, 0=historical, (0,1)=hybrid.
- *   overhead          : [in] per-step tuning overhead.
- *   fit_start         : [in] index to begin curve fitting from.
- *   number_of_tests   : [in] how many Monte Carlo trials to average over.
- * --------------------------------------------------------------------------- */
+ *   hist_HW           : [in] hardware id for the HISTORICAL data (k=0 /
+ * hybrid). k                 : [in] estimator variant: 1=live, 0=historical,
+ * (0,1)=hybrid. overhead          : [in] per-step tuning overhead. fit_start :
+ * [in] index to begin curve fitting from. number_of_tests   : [in] how many
+ * Monte Carlo trials to average over.
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
     const char *HW;
     const char *file_name;
@@ -51,11 +54,12 @@ typedef struct {
  * EvaluatorResult -- OUTPUT from evaluator_run (also mirrored on the Python
  * side). avg_* are means over all trials; std_* are their standard deviations.
  *
- *   avg/std_extra_runtime : [out] performance decline (headline metric) + spread.
- *   avg/std_crystal_ball  : [out] ORACLE stop step (mean + spread).
+ *   avg/std_extra_runtime : [out] performance decline (headline metric) +
+ * spread. avg/std_crystal_ball  : [out] ORACLE stop step (mean + spread).
  *   avg/std_estimate      : [out] ESTIMATOR stop step (mean + spread).
  *   avg_miss              : [out] mean |oracle - estimate|.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
     double avg_extra_runtime, std_extra_runtime;
     double avg_crystal_ball, std_crystal_ball;
@@ -64,11 +68,12 @@ typedef struct {
 } EvaluatorResult;
 
 /* -----------------------------------------------------------------------------
- * evaluator_run -- run the full Monte Carlo evaluation for one configuration and
- * average the metrics (mirrors Python's evaluator()).
- *   params : [in]  all inputs (see EvaluatorParams).
- *   result : [out] filled with the averaged metrics (see EvaluatorResult).
- * --------------------------------------------------------------------------- */
+ * evaluator_run -- run the full Monte Carlo evaluation for one configuration
+ * and average the metrics (mirrors Python's evaluator()). params : [in]  all
+ * inputs (see EvaluatorParams). result : [out] filled with the averaged metrics
+ * (see EvaluatorResult).
+ * ---------------------------------------------------------------------------
+ */
 void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result);
 
 /* -----------------------------------------------------------------------------
@@ -80,7 +85,8 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result);
  *   overhead          : [in] per-step overhead.
  *   number_of_tests   : [in] trials to average.
  *   returns           : O_hist, the historical optimal number of tuning steps.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 uint64_t history_run(const char *HW, const char *file_name,
                      uint64_t total_kernel_runs, uint64_t overhead,
                      uint64_t number_of_tests);
@@ -88,9 +94,11 @@ uint64_t history_run(const char *HW, const char *file_name,
 /* -----------------------------------------------------------------------------
  * get_regression_params -- fit the historical convergence curve and return its
  * a, b (used to FREEZE the curve shape in k=0 mode).
- *   HW, file_name, total_kernel_runs, fit_start, number_of_tests : [in] as above.
- *   params : [out] receives the fitted a, b, c (a, b are reused as hist_a/hist_b).
- * --------------------------------------------------------------------------- */
+ *   HW, file_name, total_kernel_runs, fit_start, number_of_tests : [in] as
+ * above. params : [out] receives the fitted a, b, c (a, b are reused as
+ * hist_a/hist_b).
+ * ---------------------------------------------------------------------------
+ */
 void get_regression_params(const char *HW, const char *file_name,
                            uint64_t total_kernel_runs, uint64_t fit_start,
                            uint64_t number_of_tests, CurveParams *params);
@@ -108,7 +116,8 @@ void get_regression_params(const char *HW, const char *file_name,
  *   overhead             : [in] per-step overhead.
  *   hist_a, hist_b       : [in] historical curve params, or -1 for none.
  *   returns              : the recommended stopping step.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 uint64_t
 recommend_tuning_length(uint64_t default_tuning_steps, const double *tuning_run,
                         uint64_t tuning_run_len, uint64_t total_kernel_runs,

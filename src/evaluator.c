@@ -1,12 +1,14 @@
 /* =============================================================================
- * evaluator.c  -- implementation of the batch Monte Carlo evaluator and helpers.
+ * evaluator.c  -- implementation of the batch Monte Carlo evaluator and
+ * helpers.
  *
  * Implements evaluator_run (average metrics over many trials), history_run
- * (historical optimum O_hist), get_regression_params (historical curve fit), and
- * recommend_tuning_length (the batch stopping rule the deployed API mirrors).
- * Public parameter docs live in evaluator.h; the comments here explain the
- * internals (sampling, the Monte Carlo loop, the cost model).
- * ============================================================================= */
+ * (historical optimum O_hist), get_regression_params (historical curve fit),
+ * and recommend_tuning_length (the batch stopping rule the deployed API
+ * mirrors). Public parameter docs live in evaluator.h; the comments here
+ * explain the internals (sampling, the Monte Carlo loop, the cost model).
+ * =============================================================================
+ */
 
 #include <math.h>
 #include <stdio.h>
@@ -30,6 +32,35 @@
 #define HISTORY_SEED_SALT 0xA5A5A5A5A5A5A5A5ULL
 #define EVALUATOR_SEED_SALT 0xC3D2E1F0B4A59687ULL
 #define REGRESSION_SEED_SALT 0x9E3779B97F4A7C15ULL
+
+/* -----------------------------------------------------------------------------
+ * RNG SELF-CHECK  (build with -DEVALUATOR_RNG_CHECK=1)
+ *
+ * Prints a short, screenshot-friendly report proving the Monte Carlo sampling
+ * is genuinely random: that every trial gets its own seed, that no two trials
+ * share one, and that the resulting stop steps actually vary. Off by default
+ * and costs nothing when off.
+ *
+ *   gcc ... -DEVALUATOR_RNG_CHECK=1 ...
+ *
+ * Output goes to stderr so it never mixes into a harness's results on stdout.
+ * ---------------------------------------------------------------------------
+ */
+#ifndef EVALUATOR_RNG_CHECK
+#define EVALUATOR_RNG_CHECK 0
+#endif
+
+#if EVALUATOR_RNG_CHECK
+#define EVAL_RNG_LOG(...)                                                      \
+    do {                                                                       \
+        fprintf(stderr, __VA_ARGS__);                                          \
+        fprintf(stderr, "\n");                                                 \
+    } while (0)
+#else
+#define EVAL_RNG_LOG(...)                                                      \
+    do {                                                                       \
+    } while (0)
+#endif
 
 /* One simulated run's results */
 typedef struct {
@@ -660,6 +691,12 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result) {
         clear_result(result);
         return;
     }
+#if EVALUATOR_RNG_CHECK
+    /* per-trial seed + stop step, summarised after the loop */
+    uint64_t *rngchk_seed = malloc(params->number_of_tests * sizeof(uint64_t));
+    double *rngchk_est = malloc(params->number_of_tests * sizeof(double));
+#endif
+
     /* THE MAIN PARALLEL LOOP: run every Monte Carlo test. Each thread writes
      * only to its own bucket (indexed by tid), so there are no data races. */
 #pragma omp parallel for if (params->number_of_tests > 32)
@@ -672,6 +709,10 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result) {
             &data, curve_limit, params->total_kernel_runs, params->overhead,
             params->k, default_tuning_steps, params->fit_start, hist_a, hist_b,
             &workspaces[tid], &rng_state);
+#if EVALUATOR_RNG_CHECK
+        rngchk_seed[test] = make_test_seed(test, EVALUATOR_SEED_SALT);
+        rngchk_est[test] = (double)res.estimate;
+#endif
         sum_extra_th[tid] += res.extra_runtime;
         sum_extra_sq_th[tid] += res.extra_runtime * res.extra_runtime;
         sum_crystal_th[tid] += res.crystal_idx + 1;
@@ -680,6 +721,62 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result) {
         sum_estimate_sq_th[tid] += res.estimate * res.estimate;
         sum_miss_th[tid] += res.miss;
     }
+
+#if EVALUATOR_RNG_CHECK
+    {
+        uint64_t n = params->number_of_tests;
+        /* 1. are all per-trial seeds distinct? (a collision would mean two
+         *    trials silently ran the identical sampled run) */
+        uint64_t dup = 0;
+        for (uint64_t i = 0; i < n; i++)
+            for (uint64_t j = i + 1; j < n; j++)
+                if (rngchk_seed[i] == rngchk_seed[j]) {
+                    dup++;
+                    break;
+                }
+        /* 2. did the resulting stop steps actually vary? */
+        double mn = rngchk_est[0], mx = rngchk_est[0], sum = 0, sum2 = 0;
+        for (uint64_t i = 0; i < n; i++) {
+            if (rngchk_est[i] < mn)
+                mn = rngchk_est[i];
+            if (rngchk_est[i] > mx)
+                mx = rngchk_est[i];
+            sum += rngchk_est[i];
+            sum2 += rngchk_est[i] * rngchk_est[i];
+        }
+        double mean = sum / (double)n;
+        double var = sum2 / (double)n - mean * mean;
+        double sd = (var > 0) ? sqrt(var) : 0.0;
+
+        EVAL_RNG_LOG("%s", "");
+        EVAL_RNG_LOG(
+            "+-- RNG SELF-CHECK (evaluator) -------------------------+");
+        EVAL_RNG_LOG("|  HW=%-5s runs=%-9llu k=%-4.1f oh=%-8llu       |",
+                     params->HW, (unsigned long long)params->total_kernel_runs,
+                     params->k, (unsigned long long)params->overhead);
+        EVAL_RNG_LOG("|  trials: %-6llu                                     |",
+                     (unsigned long long)n);
+        EVAL_RNG_LOG(
+            "|  seeds  : first 3 = %llu, %llu, %llu",
+            (unsigned long long)(rngchk_seed[0] % 1000000),
+            (unsigned long long)(rngchk_seed[n > 1 ? 1 : 0] % 1000000),
+            (unsigned long long)(rngchk_seed[n > 2 ? 2 : 0] % 1000000));
+        EVAL_RNG_LOG("|  seeds  : duplicates = %llu  -> %s",
+                     (unsigned long long)dup,
+                     dup == 0 ? "ALL DISTINCT (ok)" : "COLLISION (BAD)");
+        EVAL_RNG_LOG("|  stops  : min=%.0f max=%.0f mean=%.1f sd=%.1f", mn, mx,
+                     mean, sd);
+        EVAL_RNG_LOG("|  verdict: %s",
+                     (dup == 0 && mx > mn)
+                         ? "RANDOMNESS ACTIVE (seeds unique, stops vary)"
+                         : "NOT RANDOM (identical seeds or constant stop)");
+        EVAL_RNG_LOG(
+            "+-------------------------------------------------------+");
+        EVAL_RNG_LOG("%s", "");
+        free(rngchk_seed);
+        free(rngchk_est);
+    }
+#endif
 
     /* REDUCTION: combine all threads' partial sums into grand totals. */
     double sum_extra = 0, sum_crystal = 0, sum_estimate = 0, sum_miss = 0,

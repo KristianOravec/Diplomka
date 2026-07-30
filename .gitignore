@@ -49,3 +49,10 @@ raw-data/
 # Benchmark results
 *.csv
 !python/*.csv
+
+ignore/
+
+validate_extended
+validate_total_runtime
+validate_tuner_api
+overtune_probe

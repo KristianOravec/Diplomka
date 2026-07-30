@@ -19,9 +19,13 @@
  * is flat near the optimum -- so total runtime is the meaningful correctness
  * test.
  *
- * USAGE:  ./validate_total_runtime [trials] [mode]
- *   trials : MC trials per config (default 300)
- *   mode   : live | hist | hybrid | all   (default all)
+ * USAGE:  ./validate_total_runtime [trials] [mode] [outfile]
+ *   trials  : MC trials per config (default 300)
+ *   mode    : live | hist | hybrid | all   (default all)
+ *   outfile : results file (default total_runtime_results.txt). Rows are
+ *             written and flushed as each config finishes, so an interrupted
+ *             run keeps its completed results and you can watch progress with
+ *             `tail -f`.
  *
  * Run from the dir containing raw-data/.
  * =============================================================================
@@ -117,58 +121,124 @@ typedef struct {
     const char *k;
     uint64_t oh;
     double py_decline;
+    const char *hist_hw; /* historical HW used to generate this reference row */
 } Ref;
-/* Python "Performance decline (%)" from benchmarking_gemm-reduced_output.csv.
- */
+/* Reference "Performance decline (%)" values.
+ * 680 rows: from the original benchmarking_gemm-reduced_output.csv.
+ * 750/1070/2080 rows: from merged_JARDA_vs_KRISTIAN_full.csv (Kristian column),
+ * which also adds the extra overhead settings 100 / 1000 / 100000. */
 static Ref refs[] = {
-    {"680", 10000ULL, "1.0", 10000ULL, 17.038522},
-    {"680", 10000ULL, "1.0", 1000000ULL, 36.381331},
-    {"680", 10000ULL, "0.0", 10000ULL, 6.673845},
-    {"680", 10000ULL, "0.0", 1000000ULL, 37.520920},
-    {"680", 10000ULL, "0.5", 10000ULL, 6.717256},
-    {"680", 10000ULL, "0.5", 1000000ULL, 37.128403},
-    {"680", 10000000ULL, "1.0", 10000ULL, 28.236678},
-    {"680", 10000000ULL, "1.0", 1000000ULL, 26.158967},
-    {"680", 10000000ULL, "0.0", 10000ULL, 4.784461},
-    {"680", 10000000ULL, "0.0", 1000000ULL, 6.623326},
-    {"680", 10000000ULL, "0.5", 10000ULL, 0.913113},
-    {"680", 10000000ULL, "0.5", 1000000ULL, 2.991621},
-    {"750", 10000ULL, "1.0", 10000ULL, 18.007170},
-    {"750", 10000ULL, "1.0", 1000000ULL, 25.339461},
-    {"750", 10000ULL, "0.0", 10000ULL, 9.188003},
-    {"750", 10000ULL, "0.0", 1000000ULL, 25.452136},
-    {"750", 10000ULL, "0.5", 10000ULL, 8.643246},
-    {"750", 10000ULL, "0.5", 1000000ULL, 25.085750},
-    {"750", 10000000ULL, "1.0", 10000ULL, 30.671944},
-    {"750", 10000000ULL, "1.0", 1000000ULL, 28.219934},
-    {"750", 10000000ULL, "0.0", 10000ULL, 11.103594},
-    {"750", 10000000ULL, "0.0", 1000000ULL, 10.807085},
-    {"750", 10000000ULL, "0.5", 10000ULL, 1.435452},
-    {"750", 10000000ULL, "0.5", 1000000ULL, 4.199739},
-    {"1070", 10000ULL, "1.0", 10000ULL, 17.551271},
-    {"1070", 10000ULL, "1.0", 1000000ULL, 127.467788},
-    {"1070", 10000ULL, "0.0", 10000ULL, 13.618893},
-    {"1070", 10000ULL, "0.0", 1000000ULL, 127.480775},
-    {"1070", 10000ULL, "0.5", 10000ULL, 10.176324},
-    {"1070", 10000ULL, "0.5", 1000000ULL, 128.016067},
-    {"1070", 10000000ULL, "1.0", 10000ULL, 40.405348},
-    {"1070", 10000000ULL, "1.0", 1000000ULL, 33.004625},
-    {"1070", 10000000ULL, "0.0", 10000ULL, 0.253486},
-    {"1070", 10000000ULL, "0.0", 1000000ULL, 7.067604},
-    {"1070", 10000000ULL, "0.5", 10000ULL, 1.186747},
-    {"1070", 10000000ULL, "0.5", 1000000ULL, 5.101135},
-    {"2080", 10000ULL, "1.0", 10000ULL, 15.815015},
-    {"2080", 10000ULL, "1.0", 1000000ULL, 26.972473},
-    {"2080", 10000ULL, "0.0", 10000ULL, 7.119833},
-    {"2080", 10000ULL, "0.0", 1000000ULL, 28.495403},
-    {"2080", 10000ULL, "0.5", 10000ULL, 8.106003},
-    {"2080", 10000ULL, "0.5", 1000000ULL, 27.455944},
-    {"2080", 10000000ULL, "1.0", 10000ULL, 26.602315},
-    {"2080", 10000000ULL, "1.0", 1000000ULL, 24.751806},
-    {"2080", 10000000ULL, "0.0", 10000ULL, 7.760319},
-    {"2080", 10000000ULL, "0.0", 1000000ULL, 8.848318},
-    {"2080", 10000000ULL, "0.5", 10000ULL, 1.328840},
-    {"2080", 10000000ULL, "0.5", 1000000ULL, 5.360631},
+    {"680", 10000ULL, "0.0", 10000ULL, 6.673845, "680"},
+    {"680", 10000ULL, "0.0", 1000000ULL, 37.520920, "680"},
+    {"680", 10000ULL, "0.5", 10000ULL, 6.717256, "680"},
+    {"680", 10000ULL, "0.5", 1000000ULL, 37.128403, "680"},
+    {"680", 10000ULL, "1.0", 10000ULL, 17.038522, "680"},
+    {"680", 10000ULL, "1.0", 1000000ULL, 36.381331, "680"},
+    {"680", 10000000ULL, "0.0", 10000ULL, 4.784461, "680"},
+    {"680", 10000000ULL, "0.0", 1000000ULL, 6.623326, "680"},
+    {"680", 10000000ULL, "0.5", 10000ULL, 0.913113, "680"},
+    {"680", 10000000ULL, "0.5", 1000000ULL, 2.991621, "680"},
+    {"680", 10000000ULL, "1.0", 10000ULL, 28.236678, "680"},
+    {"680", 10000000ULL, "1.0", 1000000ULL, 26.158967, "680"},
+    {"750", 10000ULL, "0.0", 100ULL, 16.587014, "1070"},
+    {"750", 10000ULL, "0.0", 1000ULL, 16.409663, "1070"},
+    {"750", 10000ULL, "0.0", 10000ULL, 14.706002, "1070"},
+    {"750", 10000ULL, "0.0", 100000ULL, 11.040693, "1070"},
+    {"750", 10000ULL, "0.0", 1000000ULL, 25.312916, "1070"},
+    {"750", 10000ULL, "0.5", 100ULL, 5.445235, "1070"},
+    {"750", 10000ULL, "0.5", 1000ULL, 6.623712, "1070"},
+    {"750", 10000ULL, "0.5", 10000ULL, 10.691242, "1070"},
+    {"750", 10000ULL, "0.5", 100000ULL, 10.677386, "1070"},
+    {"750", 10000ULL, "0.5", 1000000ULL, 24.666943, "1070"},
+    {"750", 10000ULL, "1.0", 100ULL, 22.042021, "1070"},
+    {"750", 10000ULL, "1.0", 1000ULL, 21.653146, "1070"},
+    {"750", 10000ULL, "1.0", 10000ULL, 18.576328, "1070"},
+    {"750", 10000ULL, "1.0", 100000ULL, 10.677386, "1070"},
+    {"750", 10000ULL, "1.0", 1000000ULL, 24.666943, "1070"},
+    {"750", 1000000ULL, "0.0", 100000ULL, 20.341683, "1070"},
+    {"750", 1000000ULL, "0.0", 1000000ULL, 15.943181, "1070"},
+    {"750", 1000000ULL, "0.5", 100000ULL, 6.688852, "1070"},
+    {"750", 1000000ULL, "0.5", 1000000ULL, 11.736089, "1070"},
+    {"750", 1000000ULL, "1.0", 100000ULL, 28.311820, "1070"},
+    {"750", 1000000ULL, "1.0", 1000000ULL, 21.011898, "1070"},
+    {"750", 10000000ULL, "0.0", 100ULL, 21.834966, "1070"},
+    {"750", 10000000ULL, "0.0", 1000ULL, 22.022469, "1070"},
+    {"750", 10000000ULL, "0.0", 10000ULL, 21.981411, "1070"},
+    {"750", 10000000ULL, "0.0", 1000000ULL, 20.565778, "1070"},
+    {"750", 10000000ULL, "0.5", 100ULL, 1.346436, "1070"},
+    {"750", 10000000ULL, "0.5", 1000ULL, 1.347873, "1070"},
+    {"750", 10000000ULL, "0.5", 10000ULL, 1.429335, "1070"},
+    {"750", 10000000ULL, "0.5", 1000000ULL, 6.684293, "1070"},
+    {"750", 10000000ULL, "1.0", 100ULL, 31.491458, "1070"},
+    {"750", 10000000ULL, "1.0", 1000ULL, 31.487553, "1070"},
+    {"750", 10000000ULL, "1.0", 10000ULL, 31.496248, "1070"},
+    {"750", 10000000ULL, "1.0", 1000000ULL, 28.454284, "1070"},
+    {"1070", 10000ULL, "0.0", 100ULL, 6.711087, "1070"},
+    {"1070", 10000ULL, "0.0", 1000ULL, 7.599889, "1070"},
+    {"1070", 10000ULL, "0.0", 10000ULL, 9.326852, "1070"},
+    {"1070", 10000ULL, "0.0", 100000ULL, 14.902479, "1070"},
+    {"1070", 10000ULL, "0.0", 1000000ULL, 127.332489, "1070"},
+    {"1070", 10000ULL, "0.5", 100ULL, 7.841139, "1070"},
+    {"1070", 10000ULL, "0.5", 1000ULL, 8.930474, "1070"},
+    {"1070", 10000ULL, "0.5", 10000ULL, 11.583142, "1070"},
+    {"1070", 10000ULL, "0.5", 100000ULL, 14.949595, "1070"},
+    {"1070", 10000ULL, "0.5", 1000000ULL, 121.585266, "1070"},
+    {"1070", 10000ULL, "1.0", 100ULL, 31.222440, "1070"},
+    {"1070", 10000ULL, "1.0", 1000ULL, 28.759448, "1070"},
+    {"1070", 10000ULL, "1.0", 10000ULL, 18.210415, "1070"},
+    {"1070", 10000ULL, "1.0", 100000ULL, 14.949595, "1070"},
+    {"1070", 10000ULL, "1.0", 1000000ULL, 121.585266, "1070"},
+    {"1070", 1000000ULL, "0.0", 100000ULL, 6.705876, "1070"},
+    {"1070", 1000000ULL, "0.0", 1000000ULL, 9.448730, "1070"},
+    {"1070", 1000000ULL, "0.5", 100000ULL, 6.998256, "1070"},
+    {"1070", 1000000ULL, "0.5", 1000000ULL, 11.479724, "1070"},
+    {"1070", 1000000ULL, "1.0", 100000ULL, 33.007488, "1070"},
+    {"1070", 1000000ULL, "1.0", 1000000ULL, 19.182440, "1070"},
+    {"1070", 10000000ULL, "0.0", 100ULL, 3.685144, "1070"},
+    {"1070", 10000000ULL, "0.0", 1000ULL, 4.204576, "1070"},
+    {"1070", 10000000ULL, "0.0", 10000ULL, 4.397003, "1070"},
+    {"1070", 10000000ULL, "0.0", 1000000ULL, 6.876644, "1070"},
+    {"1070", 10000000ULL, "0.5", 100ULL, 1.212492, "1070"},
+    {"1070", 10000000ULL, "0.5", 1000ULL, 1.232419, "1070"},
+    {"1070", 10000000ULL, "0.5", 10000ULL, 1.385980, "1070"},
+    {"1070", 10000000ULL, "0.5", 1000000ULL, 7.005274, "1070"},
+    {"1070", 10000000ULL, "1.0", 100ULL, 41.808577, "1070"},
+    {"1070", 10000000ULL, "1.0", 1000ULL, 41.784298, "1070"},
+    {"1070", 10000000ULL, "1.0", 10000ULL, 41.639431, "1070"},
+    {"1070", 10000000ULL, "1.0", 1000000ULL, 33.070035, "1070"},
+    {"2080", 10000ULL, "0.0", 100ULL, 14.132291, "1070"},
+    {"2080", 10000ULL, "0.0", 1000ULL, 13.785644, "1070"},
+    {"2080", 10000ULL, "0.0", 10000ULL, 11.773454, "1070"},
+    {"2080", 10000ULL, "0.0", 100000ULL, 8.048280, "1070"},
+    {"2080", 10000ULL, "0.0", 1000000ULL, 27.526621, "1070"},
+    {"2080", 10000ULL, "0.5", 100ULL, 6.357583, "1070"},
+    {"2080", 10000ULL, "0.5", 1000ULL, 6.903232, "1070"},
+    {"2080", 10000ULL, "0.5", 10000ULL, 9.846525, "1070"},
+    {"2080", 10000ULL, "0.5", 100000ULL, 8.156045, "1070"},
+    {"2080", 10000ULL, "0.5", 1000000ULL, 26.693601, "1070"},
+    {"2080", 10000ULL, "1.0", 100ULL, 20.199566, "1070"},
+    {"2080", 10000ULL, "1.0", 1000ULL, 19.535357, "1070"},
+    {"2080", 10000ULL, "1.0", 10000ULL, 15.650991, "1070"},
+    {"2080", 10000ULL, "1.0", 100000ULL, 8.156045, "1070"},
+    {"2080", 10000ULL, "1.0", 1000000ULL, 26.693601, "1070"},
+    {"2080", 1000000ULL, "0.0", 100000ULL, 17.444143, "1070"},
+    {"2080", 1000000ULL, "0.0", 1000000ULL, 12.629180, "1070"},
+    {"2080", 1000000ULL, "0.5", 100000ULL, 7.312042, "1070"},
+    {"2080", 1000000ULL, "0.5", 1000000ULL, 10.649537, "1070"},
+    {"2080", 1000000ULL, "1.0", 100000ULL, 24.905201, "1070"},
+    {"2080", 1000000ULL, "1.0", 1000000ULL, 17.363949, "1070"},
+    {"2080", 10000000ULL, "0.0", 100ULL, 18.186497, "1070"},
+    {"2080", 10000000ULL, "0.0", 1000ULL, 17.991728, "1070"},
+    {"2080", 10000000ULL, "0.0", 10000ULL, 18.359469, "1070"},
+    {"2080", 10000000ULL, "0.0", 1000000ULL, 17.313064, "1070"},
+    {"2080", 10000000ULL, "0.5", 100ULL, 1.331163, "1070"},
+    {"2080", 10000000ULL, "0.5", 1000ULL, 1.337845, "1070"},
+    {"2080", 10000000ULL, "0.5", 10000ULL, 1.409713, "1070"},
+    {"2080", 10000000ULL, "0.5", 1000000ULL, 7.260816, "1070"},
+    {"2080", 10000000ULL, "1.0", 100ULL, 27.784365, "1070"},
+    {"2080", 10000000ULL, "1.0", 1000ULL, 27.780459, "1070"},
+    {"2080", 10000000ULL, "1.0", 10000ULL, 27.756297, "1070"},
+    {"2080", 10000000ULL, "1.0", 1000000ULL, 25.006884, "1070"},
 };
 
 static TunerMode mode_of(const char *k) {
@@ -193,7 +263,17 @@ static int want(const char *k, const char *m) {
 int main(int argc, char **argv) {
     uint64_t trials = (argc > 1) ? strtoull(argv[1], NULL, 10) : 300;
     const char *mode = (argc > 2) ? argv[2] : "all";
+    const char *outpath = (argc > 3) ? argv[3] : "total_runtime_results.txt";
     uint64_t fit_start = 10, hist_tests = 1000;
+
+    /* Results are written to this file AS THEY ARE COMPUTED (each row flushed
+     * immediately), so an interrupted run keeps its completed rows and you can
+     * watch progress live with: tail -f total_runtime_results.txt */
+    FILE *out = fopen(outpath, "w");
+    if (!out) {
+        fprintf(stderr, "ERROR: cannot open output file '%s'\n", outpath);
+        return 1;
+    }
 
     printf("DEPLOYED tuner_api TOTAL-RUNTIME test vs Python decline%%  "
            "(trials=%lu, mode=%s)\n",
@@ -204,6 +284,18 @@ int main(int argc, char **argv) {
            "diff(pp)");
     printf("-------------------------------------------------------------------"
            "---------------\n");
+
+    fprintf(out,
+            "DEPLOYED tuner_api TOTAL-RUNTIME test vs Python decline%%  "
+            "(trials=%lu, mode=%s)\n",
+            (unsigned long)trials, mode);
+    fprintf(out, "==========================================================="
+                 "=======================\n");
+    fprintf(out, "%-24s %12s %12s %9s\n", "HW/runs/k/oh", "C_decl%", "Py_decl%",
+            "diff(pp)");
+    fprintf(out, "-----------------------------------------------------------"
+                 "-----------------------\n");
+    fflush(out);
 
     int n = (int)(sizeof(refs) / sizeof(*refs));
     double sum_abs = 0;
@@ -245,7 +337,7 @@ int main(int argc, char **argv) {
         cfg.fit_start = fit_start;
         cfg.mode = mode_of(r->k);
         cfg.k = atof(r->k);
-        cfg.hist_HW = "680";
+        cfg.hist_HW = r->hist_hw;
         cfg.file_name = "gemm-reduced_output.csv";
         cfg.hist_number_of_tests = hist_tests;
 
@@ -263,31 +355,31 @@ int main(int argc, char **argv) {
         for (uint64_t t = 0; t < trials; t++) {
             reset_kernel(h);
 
-            /* We must replay the SAME sampled run twice in spirit: once to
-             * drive the estimator (to find its stop step), and to compute total
-             * runtime at every step so we can also get the oracle minimum. So
-             * we pre-generate the run, then (a) feed it to the API and (b) scan
-             * it for the oracle. */
+            /* Pre-generate the run so the estimator and the oracle see the
+             * SAME data, then walk it ONCE: feed the estimator until it stops
+             * (flag, not break -- the oracle must keep scanning to the end). */
             /* generate the run */
             static double run[2000]; /* kernel times */
             for (uint64_t s = 0; s < curve_limit; s++)
                 run[s] = data[splitmix(&rng) % ndata];
 
-            /* (a) drive the estimator to its stop step */
-            uint64_t est_stop = curve_limit - 1;
-            for (uint64_t s = 0; s < curve_limit; s++) {
-                push_result(h, run[s], run[s] + (double)r->oh);
-                if (find_number_of_steps_that_should_be_tuning(h) == 0) {
-                    est_stop = s;
-                    break;
-                }
-            }
-
-            /* (b) scan the same run for cumulative cost, best-so-far, and the
-             * oracle (minimum total runtime over all stop points). */
+            /* single pass: drive the estimator AND compute the oracle */
             double cumulative_total = 0, best = run[0];
             double oracle_total = INFINITY, est_total = 0;
+            uint64_t est_stop = curve_limit - 1;
+            int stopped = 0; /* has the estimator quit yet? */
+
             for (uint64_t s = 0; s < curve_limit; s++) {
+                /* --- estimator side: only until it stops --- */
+                if (!stopped) {
+                    push_result(h, run[s], run[s] + (double)r->oh);
+                    if (find_number_of_steps_that_should_be_tuning(h) == 0) {
+                        est_stop = s;
+                        stopped = 1; /* record it, but KEEP LOOPING */
+                    }
+                }
+
+                /* --- oracle side: always, to the end --- */
                 if (run[s] < best)
                     best = run[s];
                 cumulative_total +=
@@ -316,6 +408,11 @@ int main(int argc, char **argv) {
         printf("%-24s %12.3f %12.3f %9.2f\n", cfgname, c_decl, r->py_decline,
                diff);
         fflush(stdout);
+        /* write this row NOW (flushed) so completed results survive an
+         * interrupted run */
+        fprintf(out, "%-24s %12.3f %12.3f %9.2f\n", cfgname, c_decl,
+                r->py_decline, diff);
+        fflush(out);
     }
     free(data);
     printf("-------------------------------------------------------------------"
@@ -326,5 +423,17 @@ int main(int argc, char **argv) {
                sum_abs / cnt, cnt, mode);
     printf("decline%% = total_runtime(estimator stop)/total_runtime(oracle "
            "stop) - 1\n");
+
+    fprintf(out, "-----------------------------------------------------------"
+                 "-----------------------\n");
+    if (cnt)
+        fprintf(out,
+                "mean |C - Py| performance-decline difference: %.2f pp over %d "
+                "configs (mode=%s)\n",
+                sum_abs / cnt, cnt, mode);
+    fprintf(out, "decline%% = total_runtime(estimator stop)/total_runtime("
+                 "oracle stop) - 1\n");
+    fclose(out);
+    printf("\nresults written to: %s\n", outpath);
     return 0;
 }
