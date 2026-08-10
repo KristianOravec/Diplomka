@@ -93,6 +93,10 @@ static double *load_column(const char *path, uint64_t *out_n) {
     return d;
 }
 
+
+/* SplitMix64: fast PRNG, state is the single uint64_t at `s`. Advances the
+ * state by a fixed constant, then scrambles via multiply-xor-shift so
+ * consecutive values look independent. Same seed -> same sequence. */
 static uint64_t splitmix(uint64_t *s) {
     uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -100,11 +104,12 @@ static uint64_t splitmix(uint64_t *s) {
     return z ^ (z >> 31);
 }
 
-/* The cost model, replicated from evaluator.c's total_runtime_for_step():
- *   total = (sum of tuning-step total runtimes) + best_so_far * (remaining
- * runs) cumulative_total = sum over steps 0..step_idx of the total runtime
- * spent best_runtime     = best kernel time found by step_idx
- * (total_kernel_runs - step_idx) = how many of the #E runs remain after tuning
+/* The paper's cost model T(x) (Section 2.2/2.3)
+ * paper: T(x) = x * Ci + (#E - x)*pred(x)
+ * here: total = cumulative_total + remaining * best_runtime
+ * x * Ci      -> cumulative_total (actual time spent, not steps x per-step cost)
+ * #E − x      -> remaining        (total_kernel_runs − step_idx)
+ * pred(x)     -> best_runtime     (the real best found, not the fitted curve)
  */
 static double total_runtime_for_step(double cumulative_total, uint64_t step_idx,
                                      double best_runtime,
@@ -248,6 +253,9 @@ static TunerMode mode_of(const char *k) {
         return TUNER_MODE_HISTORICAL;
     return TUNER_MODE_HYBRID;
 }
+
+/* Returns 1 if the key `k` matches the mode `m` (e.g. "1.0" matches "live"),
+ * 0 otherwise. */
 static int want(const char *k, const char *m) {
     if (!strcmp(m, "all"))
         return 1;
@@ -261,6 +269,7 @@ static int want(const char *k, const char *m) {
 }
 
 int main(int argc, char **argv) {
+    /* Input parsing */
     uint64_t trials = (argc > 1) ? strtoull(argv[1], NULL, 10) : 300;
     const char *mode = (argc > 2) ? argv[2] : "all";
     const char *outpath = (argc > 3) ? argv[3] : "total_runtime_results.txt";
@@ -304,13 +313,17 @@ int main(int argc, char **argv) {
     double *data = NULL;
     uint64_t ndata = 0;
 
+    /* one iteration = one configuration from the refs[] table */
     for (int i = 0; i < n; i++) {
         Ref *r = &refs[i];
         if (!want(r->k, mode))
             continue;
 
+        /* Load this GPU's runtimes, but only when the hardware CHANGES. refs[]
+        * is sorted by HW, so consecutive rows usually share a file -- this
+        * caches it instead of re-reading ~5788 rows per config. */
         if (strcmp(loaded_hw, r->hw) != 0) {
-            free(data);
+            free(data); /* release the previous GPU's array */
             char path[512];
             snprintf(path, sizeof(path),
                      "raw-data/raw-autotuning-data/gemm-reduced/"
@@ -318,6 +331,7 @@ int main(int argc, char **argv) {
                      r->hw);
             data = load_column(path, &ndata);
             if (!data) {
+                /* missing file: skip every row for this GPU, don't abort */
                 printf("[skip %s: no data]\n", r->hw);
                 loaded_hw[0] = '\0';
                 continue;
@@ -325,6 +339,9 @@ int main(int argc, char **argv) {
             snprintf(loaded_hw, sizeof(loaded_hw), "%s", r->hw);
         }
 
+        /* How long one simulated run is: you cannot tune for more steps than
+        * the app will run (r->runs) or than there are configs (ndata), and
+        * 2000 is the project-wide cap (CURVE_LIMIT_MAX). */
         uint64_t curve_limit = (r->runs < ndata) ? r->runs : ndata;
         if (curve_limit > 2000)
             curve_limit = 2000;
@@ -335,8 +352,8 @@ int main(int argc, char **argv) {
         cfg.total_kernel_runs = r->runs;
         cfg.overhead = r->oh;
         cfg.fit_start = fit_start;
-        cfg.mode = mode_of(r->k);
-        cfg.k = atof(r->k);
+        cfg.mode = mode_of(r->k); /* "1.0"/"0.0"/"0.5" -> enum */
+        cfg.k = atof(r->k); /* same value as a number */
         cfg.hist_HW = r->hist_hw;
         cfg.file_name = "gemm-reduced_output.csv";
         cfg.hist_number_of_tests = hist_tests;
@@ -348,7 +365,9 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        double sum_extra = 0; /* sum of per-trial extra% */
+        double sum_extra = 0; /* sum of per-trial extra%, averaged at the end */
+        /* Seed differs per config but is FIXED across runs, so results are
+         * reproducible. Pass a seed_base argument to draw a different sample. */
         uint64_t rng =
             0xDA7A1234C0FFEEULL ^ ((uint64_t)i << 1); /* per-config seed */
 

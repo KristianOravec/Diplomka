@@ -129,7 +129,7 @@ void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
 
     /* MODE 1 -- nothing to fit (fit_start == n). Return sensible defaults and
      * use the last observed value as the floor c. */
-    if (fit_n == 0) {
+    if (n <= fit_start) {
         *a = CURVEFIT_INITIAL_DECAY;
         *b = CURVEFIT_INITIAL_SCALE;
         *c = y[n - 1];

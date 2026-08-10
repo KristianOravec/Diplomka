@@ -217,7 +217,11 @@ KernelHandle *initiate_kernel(const KernelConfig *cfg, const char *debug_name,
     /* Resolve historical data for the non-LIVE modes -- done ONCE here, the
      * same way evaluator_run does it. */
     if (cfg->mode == TUNER_MODE_HISTORICAL) {
-        /* k == 0: fit historical curve params a, b. */
+        /* k == 0: fit the frozen curve from the historical GPU's raw data --
+         * a,b,c are computed here, not loaded. Keep only a,b (the shape, which
+         * transfers across hardware); cp.c is the historical GPU's floor and is
+         * discarded, since c is refit live on this kernel's own samples. */
+
         CurveParams cp;
         get_regression_params(cfg->hist_HW, cfg->file_name,
                               cfg->total_kernel_runs, cfg->fit_start,

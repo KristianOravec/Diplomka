@@ -22,7 +22,8 @@ extern "C" {
 #define CURVE_LIMIT_MAX 2000 /* hard cap on simulated run length / curve size  \
                               */
 #define DEFAULT_FIT_START 15 /* fallback fit-start (NOTE: tuner uses 10) */
-#define NO_HISTORICAL_DATA -1.0 /* sentinel: "no historical a/b supplied" */
+#define NO_HISTORICAL_DATA -1.0 /* sentinel: "no historical a/b supplied", also "this particular call has no a,b to freeze"  */
+
 
 /* -----------------------------------------------------------------------------
  * EvaluatorParams -- INPUT to evaluator_run.
