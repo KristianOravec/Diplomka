@@ -22,6 +22,8 @@
  * USAGE:  ./validate_total_runtime [trials] [mode] [outfile]
  *   trials  : MC trials per config (default 300)
  *   mode    : live | hist | hybrid | all   (default all)
+ *   seed    : (4th arg) seed base. Omit for the fixed default (reproducible);
+ *             pass 1, 2, 3 ... to draw different samples and gauge noise.
  *   outfile : results file (default total_runtime_results.txt). Rows are
  *             written and flushed as each config finishes, so an interrupted
  *             run keeps its completed results and you can watch progress with
@@ -93,10 +95,6 @@ static double *load_column(const char *path, uint64_t *out_n) {
     return d;
 }
 
-
-/* SplitMix64: fast PRNG, state is the single uint64_t at `s`. Advances the
- * state by a fixed constant, then scrambles via multiply-xor-shift so
- * consecutive values look independent. Same seed -> same sequence. */
 static uint64_t splitmix(uint64_t *s) {
     uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -104,12 +102,11 @@ static uint64_t splitmix(uint64_t *s) {
     return z ^ (z >> 31);
 }
 
-/* The paper's cost model T(x) (Section 2.2/2.3)
- * paper: T(x) = x * Ci + (#E - x)*pred(x)
- * here: total = cumulative_total + remaining * best_runtime
- * x * Ci      -> cumulative_total (actual time spent, not steps x per-step cost)
- * #E − x      -> remaining        (total_kernel_runs − step_idx)
- * pred(x)     -> best_runtime     (the real best found, not the fitted curve)
+/* The cost model, replicated from evaluator.c's total_runtime_for_step():
+ *   total = (sum of tuning-step total runtimes) + best_so_far * (remaining
+ * runs) cumulative_total = sum over steps 0..step_idx of the total runtime
+ * spent best_runtime     = best kernel time found by step_idx
+ * (total_kernel_runs - step_idx) = how many of the #E runs remain after tuning
  */
 static double total_runtime_for_step(double cumulative_total, uint64_t step_idx,
                                      double best_runtime,
@@ -128,151 +125,192 @@ typedef struct {
     double py_decline;
     const char *hist_hw; /* historical HW used to generate this reference row */
 } Ref;
-/* Reference "Performance decline (%)" values.
- * 680 rows: from the original benchmarking_gemm-reduced_output.csv.
- * 750/1070/2080 rows: from merged_JARDA_vs_KRISTIAN_full.csv (Kristian column),
- * which also adds the extra overhead settings 100 / 1000 / 100000. */
+/*Reference "Performance decline (%)" values -- the PYTHON ground truth.
+* 680 rows              : benchmarking_gemm-reduced_output.csv (hist_HW = 680).
+* 750 / 1070 / 2080 rows: JARDA_benchmarking_gemm-reduced_output_1070_*.csv,
+*                         i.e. the ORIGINAL author's Python output, generated
+*                         with hist_HW = 1070. These also cover the extra
+*                         overhead settings 100 / 1000 / 100000.
+* hist_hw is stored per row because it MUST match the run that produced the
+* reference: k=0 freezes the curve from that hardware, so using the wrong one
+* biases every historical-mode result. */
 static Ref refs[] = {
-    {"680", 10000ULL, "0.0", 10000ULL, 6.673845, "680"},
-    {"680", 10000ULL, "0.0", 1000000ULL, 37.520920, "680"},
-    {"680", 10000ULL, "0.5", 10000ULL, 6.717256, "680"},
-    {"680", 10000ULL, "0.5", 1000000ULL, 37.128403, "680"},
-    {"680", 10000ULL, "1.0", 10000ULL, 17.038522, "680"},
-    {"680", 10000ULL, "1.0", 1000000ULL, 36.381331, "680"},
-    {"680", 10000000ULL, "0.0", 10000ULL, 4.784461, "680"},
-    {"680", 10000000ULL, "0.0", 1000000ULL, 6.623326, "680"},
-    {"680", 10000000ULL, "0.5", 10000ULL, 0.913113, "680"},
-    {"680", 10000000ULL, "0.5", 1000000ULL, 2.991621, "680"},
-    {"680", 10000000ULL, "1.0", 10000ULL, 28.236678, "680"},
-    {"680", 10000000ULL, "1.0", 1000000ULL, 26.158967, "680"},
-    {"750", 10000ULL, "0.0", 100ULL, 16.587014, "1070"},
-    {"750", 10000ULL, "0.0", 1000ULL, 16.409663, "1070"},
-    {"750", 10000ULL, "0.0", 10000ULL, 14.706002, "1070"},
-    {"750", 10000ULL, "0.0", 100000ULL, 11.040693, "1070"},
-    {"750", 10000ULL, "0.0", 1000000ULL, 25.312916, "1070"},
-    {"750", 10000ULL, "0.5", 100ULL, 5.445235, "1070"},
-    {"750", 10000ULL, "0.5", 1000ULL, 6.623712, "1070"},
-    {"750", 10000ULL, "0.5", 10000ULL, 10.691242, "1070"},
-    {"750", 10000ULL, "0.5", 100000ULL, 10.677386, "1070"},
-    {"750", 10000ULL, "0.5", 1000000ULL, 24.666943, "1070"},
-    {"750", 10000ULL, "1.0", 100ULL, 22.042021, "1070"},
-    {"750", 10000ULL, "1.0", 1000ULL, 21.653146, "1070"},
-    {"750", 10000ULL, "1.0", 10000ULL, 18.576328, "1070"},
-    {"750", 10000ULL, "1.0", 100000ULL, 10.677386, "1070"},
-    {"750", 10000ULL, "1.0", 1000000ULL, 24.666943, "1070"},
-    {"750", 1000000ULL, "0.0", 100000ULL, 20.341683, "1070"},
-    {"750", 1000000ULL, "0.0", 1000000ULL, 15.943181, "1070"},
-    {"750", 1000000ULL, "0.5", 100000ULL, 6.688852, "1070"},
-    {"750", 1000000ULL, "0.5", 1000000ULL, 11.736089, "1070"},
-    {"750", 1000000ULL, "1.0", 100000ULL, 28.311820, "1070"},
-    {"750", 1000000ULL, "1.0", 1000000ULL, 21.011898, "1070"},
-    {"750", 10000000ULL, "0.0", 100ULL, 21.834966, "1070"},
-    {"750", 10000000ULL, "0.0", 1000ULL, 22.022469, "1070"},
-    {"750", 10000000ULL, "0.0", 10000ULL, 21.981411, "1070"},
-    {"750", 10000000ULL, "0.0", 1000000ULL, 20.565778, "1070"},
-    {"750", 10000000ULL, "0.5", 100ULL, 1.346436, "1070"},
-    {"750", 10000000ULL, "0.5", 1000ULL, 1.347873, "1070"},
-    {"750", 10000000ULL, "0.5", 10000ULL, 1.429335, "1070"},
-    {"750", 10000000ULL, "0.5", 1000000ULL, 6.684293, "1070"},
-    {"750", 10000000ULL, "1.0", 100ULL, 31.491458, "1070"},
-    {"750", 10000000ULL, "1.0", 1000ULL, 31.487553, "1070"},
-    {"750", 10000000ULL, "1.0", 10000ULL, 31.496248, "1070"},
-    {"750", 10000000ULL, "1.0", 1000000ULL, 28.454284, "1070"},
-    {"1070", 10000ULL, "0.0", 100ULL, 6.711087, "1070"},
-    {"1070", 10000ULL, "0.0", 1000ULL, 7.599889, "1070"},
-    {"1070", 10000ULL, "0.0", 10000ULL, 9.326852, "1070"},
-    {"1070", 10000ULL, "0.0", 100000ULL, 14.902479, "1070"},
-    {"1070", 10000ULL, "0.0", 1000000ULL, 127.332489, "1070"},
-    {"1070", 10000ULL, "0.5", 100ULL, 7.841139, "1070"},
-    {"1070", 10000ULL, "0.5", 1000ULL, 8.930474, "1070"},
-    {"1070", 10000ULL, "0.5", 10000ULL, 11.583142, "1070"},
-    {"1070", 10000ULL, "0.5", 100000ULL, 14.949595, "1070"},
-    {"1070", 10000ULL, "0.5", 1000000ULL, 121.585266, "1070"},
-    {"1070", 10000ULL, "1.0", 100ULL, 31.222440, "1070"},
-    {"1070", 10000ULL, "1.0", 1000ULL, 28.759448, "1070"},
-    {"1070", 10000ULL, "1.0", 10000ULL, 18.210415, "1070"},
-    {"1070", 10000ULL, "1.0", 100000ULL, 14.949595, "1070"},
-    {"1070", 10000ULL, "1.0", 1000000ULL, 121.585266, "1070"},
-    {"1070", 1000000ULL, "0.0", 100000ULL, 6.705876, "1070"},
-    {"1070", 1000000ULL, "0.0", 1000000ULL, 9.448730, "1070"},
-    {"1070", 1000000ULL, "0.5", 100000ULL, 6.998256, "1070"},
-    {"1070", 1000000ULL, "0.5", 1000000ULL, 11.479724, "1070"},
-    {"1070", 1000000ULL, "1.0", 100000ULL, 33.007488, "1070"},
-    {"1070", 1000000ULL, "1.0", 1000000ULL, 19.182440, "1070"},
-    {"1070", 10000000ULL, "0.0", 100ULL, 3.685144, "1070"},
-    {"1070", 10000000ULL, "0.0", 1000ULL, 4.204576, "1070"},
-    {"1070", 10000000ULL, "0.0", 10000ULL, 4.397003, "1070"},
-    {"1070", 10000000ULL, "0.0", 1000000ULL, 6.876644, "1070"},
-    {"1070", 10000000ULL, "0.5", 100ULL, 1.212492, "1070"},
-    {"1070", 10000000ULL, "0.5", 1000ULL, 1.232419, "1070"},
-    {"1070", 10000000ULL, "0.5", 10000ULL, 1.385980, "1070"},
-    {"1070", 10000000ULL, "0.5", 1000000ULL, 7.005274, "1070"},
-    {"1070", 10000000ULL, "1.0", 100ULL, 41.808577, "1070"},
-    {"1070", 10000000ULL, "1.0", 1000ULL, 41.784298, "1070"},
-    {"1070", 10000000ULL, "1.0", 10000ULL, 41.639431, "1070"},
-    {"1070", 10000000ULL, "1.0", 1000000ULL, 33.070035, "1070"},
-    {"2080", 10000ULL, "0.0", 100ULL, 14.132291, "1070"},
-    {"2080", 10000ULL, "0.0", 1000ULL, 13.785644, "1070"},
-    {"2080", 10000ULL, "0.0", 10000ULL, 11.773454, "1070"},
-    {"2080", 10000ULL, "0.0", 100000ULL, 8.048280, "1070"},
-    {"2080", 10000ULL, "0.0", 1000000ULL, 27.526621, "1070"},
-    {"2080", 10000ULL, "0.5", 100ULL, 6.357583, "1070"},
-    {"2080", 10000ULL, "0.5", 1000ULL, 6.903232, "1070"},
-    {"2080", 10000ULL, "0.5", 10000ULL, 9.846525, "1070"},
-    {"2080", 10000ULL, "0.5", 100000ULL, 8.156045, "1070"},
-    {"2080", 10000ULL, "0.5", 1000000ULL, 26.693601, "1070"},
-    {"2080", 10000ULL, "1.0", 100ULL, 20.199566, "1070"},
-    {"2080", 10000ULL, "1.0", 1000ULL, 19.535357, "1070"},
-    {"2080", 10000ULL, "1.0", 10000ULL, 15.650991, "1070"},
-    {"2080", 10000ULL, "1.0", 100000ULL, 8.156045, "1070"},
-    {"2080", 10000ULL, "1.0", 1000000ULL, 26.693601, "1070"},
-    {"2080", 1000000ULL, "0.0", 100000ULL, 17.444143, "1070"},
-    {"2080", 1000000ULL, "0.0", 1000000ULL, 12.629180, "1070"},
-    {"2080", 1000000ULL, "0.5", 100000ULL, 7.312042, "1070"},
-    {"2080", 1000000ULL, "0.5", 1000000ULL, 10.649537, "1070"},
-    {"2080", 1000000ULL, "1.0", 100000ULL, 24.905201, "1070"},
-    {"2080", 1000000ULL, "1.0", 1000000ULL, 17.363949, "1070"},
-    {"2080", 10000000ULL, "0.0", 100ULL, 18.186497, "1070"},
-    {"2080", 10000000ULL, "0.0", 1000ULL, 17.991728, "1070"},
-    {"2080", 10000000ULL, "0.0", 10000ULL, 18.359469, "1070"},
-    {"2080", 10000000ULL, "0.0", 1000000ULL, 17.313064, "1070"},
-    {"2080", 10000000ULL, "0.5", 100ULL, 1.331163, "1070"},
-    {"2080", 10000000ULL, "0.5", 1000ULL, 1.337845, "1070"},
-    {"2080", 10000000ULL, "0.5", 10000ULL, 1.409713, "1070"},
-    {"2080", 10000000ULL, "0.5", 1000000ULL, 7.260816, "1070"},
-    {"2080", 10000000ULL, "1.0", 100ULL, 27.784365, "1070"},
-    {"2080", 10000000ULL, "1.0", 1000ULL, 27.780459, "1070"},
-    {"2080", 10000000ULL, "1.0", 10000ULL, 27.756297, "1070"},
-    {"2080", 10000000ULL, "1.0", 1000000ULL, 25.006884, "1070"},
+   {"680", 10000ULL, "0.0", 10000ULL, 6.673845, "680"},
+   {"680", 10000ULL, "0.0", 1000000ULL, 37.520920, "680"},
+   {"680", 10000ULL, "0.5", 10000ULL, 6.717256, "680"},
+   {"680", 10000ULL, "0.5", 1000000ULL, 37.128403, "680"},
+   {"680", 10000ULL, "1.0", 10000ULL, 17.038522, "680"},
+   {"680", 10000ULL, "1.0", 1000000ULL, 36.381331, "680"},
+   {"680", 10000000ULL, "0.0", 10000ULL, 4.784461, "680"},
+   {"680", 10000000ULL, "0.0", 1000000ULL, 6.623326, "680"},
+   {"680", 10000000ULL, "0.5", 10000ULL, 0.913113, "680"},
+   {"680", 10000000ULL, "0.5", 1000000ULL, 2.991621, "680"},
+   {"680", 10000000ULL, "1.0", 10000ULL, 28.236678, "680"},
+   {"680", 10000000ULL, "1.0", 1000000ULL, 26.158967, "680"},
+   {"750", 10000ULL, "0.0", 100ULL, 15.057263, "1070"},
+   {"750", 10000ULL, "0.0", 1000ULL, 14.825848, "1070"},
+   {"750", 10000ULL, "0.0", 10000ULL, 14.003097, "1070"},
+   {"750", 10000ULL, "0.0", 100000ULL, 10.616935, "1070"},
+   {"750", 10000ULL, "0.0", 1000000ULL, 25.745760, "1070"},
+   {"750", 10000ULL, "0.5", 100ULL, 5.505519, "1070"},
+   {"750", 10000ULL, "0.5", 1000ULL, 6.213154, "1070"},
+   {"750", 10000ULL, "0.5", 10000ULL, 10.027153, "1070"},
+   {"750", 10000ULL, "0.5", 100000ULL, 10.276305, "1070"},
+   {"750", 10000ULL, "0.5", 1000000ULL, 25.686726, "1070"},
+   {"750", 10000ULL, "1.0", 100ULL, 21.500750, "1070"},
+   {"750", 10000ULL, "1.0", 1000ULL, 21.064250, "1070"},
+   {"750", 10000ULL, "1.0", 10000ULL, 18.621411, "1070"},
+   {"750", 10000ULL, "1.0", 100000ULL, 10.459304, "1070"},
+   {"750", 10000ULL, "1.0", 1000000ULL, 25.295660, "1070"},
+   {"750", 1000000ULL, "0.0", 100000ULL, 19.424744, "1070"},
+   {"750", 1000000ULL, "0.0", 1000000ULL, 15.078164, "1070"},
+   {"750", 1000000ULL, "0.5", 100000ULL, 6.628098, "1070"},
+   {"750", 1000000ULL, "0.5", 1000000ULL, 11.620052, "1070"},
+   {"750", 1000000ULL, "1.0", 100000ULL, 28.448460, "1070"},
+   {"750", 1000000ULL, "1.0", 1000000ULL, 20.782532, "1070"},
+   {"750", 10000000ULL, "0.0", 100ULL, 20.826205, "1070"},
+   {"750", 10000000ULL, "0.0", 1000ULL, 20.839105, "1070"},
+   {"750", 10000000ULL, "0.0", 10000ULL, 22.303512, "1070"},
+   {"750", 10000000ULL, "0.0", 1000000ULL, 19.163148, "1070"},
+   {"750", 10000000ULL, "0.5", 100ULL, 1.372768, "1070"},
+   {"750", 10000000ULL, "0.5", 1000ULL, 1.374576, "1070"},
+   {"750", 10000000ULL, "0.5", 10000ULL, 1.322820, "1070"},
+   {"750", 10000000ULL, "0.5", 1000000ULL, 6.959985, "1070"},
+   {"750", 10000000ULL, "1.0", 100ULL, 30.350266, "1070"},
+   {"750", 10000000ULL, "1.0", 1000ULL, 30.369829, "1070"},
+   {"750", 10000000ULL, "1.0", 10000ULL, 31.372473, "1070"},
+   {"750", 10000000ULL, "1.0", 1000000ULL, 28.859994, "1070"},
+   {"1070", 10000ULL, "0.0", 100ULL, 6.761846, "1070"},
+   {"1070", 10000ULL, "0.0", 1000ULL, 7.673422, "1070"},
+   {"1070", 10000ULL, "0.0", 10000ULL, 9.120515, "1070"},
+   {"1070", 10000ULL, "0.0", 100000ULL, 14.880681, "1070"},
+   {"1070", 10000ULL, "0.0", 1000000ULL, 129.639996, "1070"},
+   {"1070", 10000ULL, "0.5", 100ULL, 7.891179, "1070"},
+   {"1070", 10000ULL, "0.5", 1000ULL, 9.230646, "1070"},
+   {"1070", 10000ULL, "0.5", 10000ULL, 11.130658, "1070"},
+   {"1070", 10000ULL, "0.5", 100000ULL, 15.099843, "1070"},
+   {"1070", 10000ULL, "0.5", 1000000ULL, 125.703712, "1070"},
+   {"1070", 10000ULL, "1.0", 100ULL, 30.746368, "1070"},
+   {"1070", 10000ULL, "1.0", 1000ULL, 28.175394, "1070"},
+   {"1070", 10000ULL, "1.0", 10000ULL, 17.131576, "1070"},
+   {"1070", 10000ULL, "1.0", 100000ULL, 15.457193, "1070"},
+   {"1070", 10000ULL, "1.0", 1000000ULL, 126.747452, "1070"},
+   {"1070", 1000000ULL, "0.0", 100000ULL, 6.862627, "1070"},
+   {"1070", 1000000ULL, "0.0", 1000000ULL, 9.436599, "1070"},
+   {"1070", 1000000ULL, "0.5", 100000ULL, 6.844971, "1070"},
+   {"1070", 1000000ULL, "0.5", 1000000ULL, 10.751286, "1070"},
+   {"1070", 1000000ULL, "1.0", 100000ULL, 32.902153, "1070"},
+   {"1070", 1000000ULL, "1.0", 1000000ULL, 17.633302, "1070"},
+   {"1070", 10000000ULL, "0.0", 100ULL, 3.546976, "1070"},
+   {"1070", 10000000ULL, "0.0", 1000ULL, 3.664373, "1070"},
+   {"1070", 10000000ULL, "0.0", 10000ULL, 4.156336, "1070"},
+   {"1070", 10000000ULL, "0.0", 1000000ULL, 7.070348, "1070"},
+   {"1070", 10000000ULL, "0.5", 100ULL, 0.989348, "1070"},
+   {"1070", 10000000ULL, "0.5", 1000ULL, 1.041797, "1070"},
+   {"1070", 10000000ULL, "0.5", 10000ULL, 1.286002, "1070"},
+   {"1070", 10000000ULL, "0.5", 1000000ULL, 7.610359, "1070"},
+   {"1070", 10000000ULL, "1.0", 100ULL, 39.420400, "1070"},
+   {"1070", 10000000ULL, "1.0", 1000ULL, 39.428022, "1070"},
+   {"1070", 10000000ULL, "1.0", 10000ULL, 38.668671, "1070"},
+   {"1070", 10000000ULL, "1.0", 1000000ULL, 31.560647, "1070"},
+   {"2080", 10000ULL, "0.0", 100ULL, 13.960361, "1070"},
+   {"2080", 10000ULL, "0.0", 1000ULL, 14.016053, "1070"},
+   {"2080", 10000ULL, "0.0", 10000ULL, 11.235602, "1070"},
+   {"2080", 10000ULL, "0.0", 100000ULL, 8.088121, "1070"},
+   {"2080", 10000ULL, "0.0", 1000000ULL, 27.999905, "1070"},
+   {"2080", 10000ULL, "0.5", 100ULL, 6.293504, "1070"},
+   {"2080", 10000ULL, "0.5", 1000ULL, 6.993924, "1070"},
+   {"2080", 10000ULL, "0.5", 10000ULL, 9.521710, "1070"},
+   {"2080", 10000ULL, "0.5", 100000ULL, 8.349592, "1070"},
+   {"2080", 10000ULL, "0.5", 1000000ULL, 27.357280, "1070"},
+   {"2080", 10000ULL, "1.0", 100ULL, 20.659765, "1070"},
+   {"2080", 10000ULL, "1.0", 1000ULL, 19.876260, "1070"},
+   {"2080", 10000ULL, "1.0", 10000ULL, 15.825669, "1070"},
+   {"2080", 10000ULL, "1.0", 100000ULL, 8.475940, "1070"},
+   {"2080", 10000ULL, "1.0", 1000000ULL, 27.229747, "1070"},
+   {"2080", 1000000ULL, "0.0", 100000ULL, 17.225466, "1070"},
+   {"2080", 1000000ULL, "0.0", 1000000ULL, 13.028445, "1070"},
+   {"2080", 1000000ULL, "0.5", 100000ULL, 7.678625, "1070"},
+   {"2080", 1000000ULL, "0.5", 1000000ULL, 10.930987, "1070"},
+   {"2080", 1000000ULL, "1.0", 100000ULL, 25.214918, "1070"},
+   {"2080", 1000000ULL, "1.0", 1000000ULL, 17.965163, "1070"},
+   {"2080", 10000000ULL, "0.0", 100ULL, 18.057677, "1070"},
+   {"2080", 10000000ULL, "0.0", 1000ULL, 17.998637, "1070"},
+   {"2080", 10000000ULL, "0.0", 10000ULL, 17.278640, "1070"},
+   {"2080", 10000000ULL, "0.0", 1000000ULL, 17.819912, "1070"},
+   {"2080", 10000000ULL, "0.5", 100ULL, 1.165505, "1070"},
+   {"2080", 10000000ULL, "0.5", 1000ULL, 1.253014, "1070"},
+   {"2080", 10000000ULL, "0.5", 10000ULL, 1.519993, "1070"},
+   {"2080", 10000000ULL, "0.5", 1000000ULL, 8.002066, "1070"},
+   {"2080", 10000000ULL, "1.0", 100ULL, 26.869252, "1070"},
+   {"2080", 10000000ULL, "1.0", 1000ULL, 27.817720, "1070"},
+   {"2080", 10000000ULL, "1.0", 10000ULL, 27.396568, "1070"},
+   {"2080", 10000000ULL, "1.0", 1000000ULL, 25.690108, "1070"},
 };
 
+/* -----------------------------------------------------------------------------
+ * mode_of -- translate the refs[] k-string into the API's mode enum.
+ *
+ * Each refs[] row stores k as TEXT ("1.0" / "0.0" / "0.5") because the same
+ * string is also printed in the config label. This turns it into the enum that
+ * goes into KernelConfig.mode.
+ *
+ * NOTE ON strcmp: it returns 0 when the strings are EQUAL, so the idiom
+ * `!strcmp(a, b)` reads as "a equals b" -- the ! flips 0 (equal) into true.
+ *
+ * Only the two endpoints are matched explicitly; everything else falls through
+ * to HYBRID. That is deliberate: hybrid is any k strictly between 0 and 1, so
+ * "0.5", "0.3", "0.7" ... all land there without needing separate cases.
+ * --------------------------------------------------------------------------- */
 static TunerMode mode_of(const char *k) {
     if (!strcmp(k, "1.0"))
-        return TUNER_MODE_LIVE;
+        return TUNER_MODE_LIVE; /* k=1: fit a,b,c live, no history */
     if (!strcmp(k, "0.0"))
-        return TUNER_MODE_HISTORICAL;
-    return TUNER_MODE_HYBRID;
+        return TUNER_MODE_HISTORICAL; /* k=0: freeze a,b from history */
+    return TUNER_MODE_HYBRID;         /* 0<k<1: live + historical backstop */
 }
 
-/* Returns 1 if the key `k` matches the mode `m` (e.g. "1.0" matches "live"),
- * 0 otherwise. */
+/* -----------------------------------------------------------------------------
+ * want -- should this row run, given the mode filter from the command line?
+ *
+ *   k : the row's k-string ("1.0" / "0.0" / "0.5")
+ *   m : the filter the user passed ("live" | "hist" | "hybrid" | "all")
+ *   returns 1 to run the row, 0 to skip it.
+ *
+ * The main loop uses it as:  if (!want(r->k, mode)) continue;
+ *
+ * The three middle branches return the comparison DIRECTLY -- !strcmp(...) is
+ * already 1 or 0, so it doubles as the return value and no if/else is needed.
+ *
+ * CAVEAT: hybrid is matched here by the exact string "0.5", whereas mode_of
+ * treats hybrid as a catch-all. So a future row with e.g. k="0.3" would be
+ * classified correctly by mode_of but SILENTLY SKIPPED by `hybrid` mode (it
+ * would still appear under `all`). If the grid ever gains other k values, change
+ * this branch to `strcmp(k,"1.0") && strcmp(k,"0.0")` -- i.e. "neither live nor
+ * historical" -- to mirror mode_of.
+ * --------------------------------------------------------------------------- */
 static int want(const char *k, const char *m) {
     if (!strcmp(m, "all"))
-        return 1;
+        return 1; /* no filtering: every row runs */
     if (!strcmp(m, "live"))
-        return !strcmp(k, "1.0");
+        return !strcmp(k, "1.0"); /* only k=1 rows */
     if (!strcmp(m, "hist"))
-        return !strcmp(k, "0.0");
+        return !strcmp(k, "0.0"); /* only k=0 rows */
     if (!strcmp(m, "hybrid"))
-        return !strcmp(k, "0.5");
-    return 0;
+        return !strcmp(k, "0.5"); /* only k=0.5 rows */
+    return 0;                     /* unrecognised filter: run nothing */
 }
 
 int main(int argc, char **argv) {
-    /* Input parsing */
     uint64_t trials = (argc > 1) ? strtoull(argv[1], NULL, 10) : 300;
     const char *mode = (argc > 2) ? argv[2] : "all";
     const char *outpath = (argc > 3) ? argv[3] : "total_runtime_results.txt";
+    /* Seed base: fixed by default so runs are REPRODUCIBLE (that is what makes
+     * the C-vs-Python comparison trustworthy). Pass a different number to draw a
+     * different random sample -- run with 1, 2, 3 ... and compare to see how
+     * much of each row is sampling noise. */
+    uint64_t seed_base = (argc > 4) ? strtoull(argv[4], NULL, 10)
+                                    : 0xDA7A1234C0FFEEULL;
     uint64_t fit_start = 10, hist_tests = 1000;
 
     /* Results are written to this file AS THEY ARE COMPUTED (each row flushed
@@ -289,6 +327,7 @@ int main(int argc, char **argv) {
            (unsigned long)trials, mode);
     printf("==================================================================="
            "===============\n");
+    printf("seed_base=%llu\n", (unsigned long long)seed_base);
     printf("%-24s %12s %12s %9s\n", "HW/runs/k/oh", "C_decl%", "Py_decl%",
            "diff(pp)");
     printf("-------------------------------------------------------------------"
@@ -300,6 +339,7 @@ int main(int argc, char **argv) {
             (unsigned long)trials, mode);
     fprintf(out, "==========================================================="
                  "=======================\n");
+    fprintf(out, "seed_base=%llu\n", (unsigned long long)seed_base);
     fprintf(out, "%-24s %12s %12s %9s\n", "HW/runs/k/oh", "C_decl%", "Py_decl%",
             "diff(pp)");
     fprintf(out, "-----------------------------------------------------------"
@@ -313,17 +353,13 @@ int main(int argc, char **argv) {
     double *data = NULL;
     uint64_t ndata = 0;
 
-    /* one iteration = one configuration from the refs[] table */
     for (int i = 0; i < n; i++) {
         Ref *r = &refs[i];
         if (!want(r->k, mode))
             continue;
 
-        /* Load this GPU's runtimes, but only when the hardware CHANGES. refs[]
-        * is sorted by HW, so consecutive rows usually share a file -- this
-        * caches it instead of re-reading ~5788 rows per config. */
         if (strcmp(loaded_hw, r->hw) != 0) {
-            free(data); /* release the previous GPU's array */
+            free(data);
             char path[512];
             snprintf(path, sizeof(path),
                      "raw-data/raw-autotuning-data/gemm-reduced/"
@@ -331,7 +367,6 @@ int main(int argc, char **argv) {
                      r->hw);
             data = load_column(path, &ndata);
             if (!data) {
-                /* missing file: skip every row for this GPU, don't abort */
                 printf("[skip %s: no data]\n", r->hw);
                 loaded_hw[0] = '\0';
                 continue;
@@ -339,9 +374,6 @@ int main(int argc, char **argv) {
             snprintf(loaded_hw, sizeof(loaded_hw), "%s", r->hw);
         }
 
-        /* How long one simulated run is: you cannot tune for more steps than
-        * the app will run (r->runs) or than there are configs (ndata), and
-        * 2000 is the project-wide cap (CURVE_LIMIT_MAX). */
         uint64_t curve_limit = (r->runs < ndata) ? r->runs : ndata;
         if (curve_limit > 2000)
             curve_limit = 2000;
@@ -352,8 +384,8 @@ int main(int argc, char **argv) {
         cfg.total_kernel_runs = r->runs;
         cfg.overhead = r->oh;
         cfg.fit_start = fit_start;
-        cfg.mode = mode_of(r->k); /* "1.0"/"0.0"/"0.5" -> enum */
-        cfg.k = atof(r->k); /* same value as a number */
+        cfg.mode = mode_of(r->k);
+        cfg.k = atof(r->k);
         cfg.hist_HW = r->hist_hw;
         cfg.file_name = "gemm-reduced_output.csv";
         cfg.hist_number_of_tests = hist_tests;
@@ -365,11 +397,9 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        double sum_extra = 0; /* sum of per-trial extra%, averaged at the end */
-        /* Seed differs per config but is FIXED across runs, so results are
-         * reproducible. Pass a seed_base argument to draw a different sample. */
+        double sum_extra = 0; /* sum of per-trial extra% */
         uint64_t rng =
-            0xDA7A1234C0FFEEULL ^ ((uint64_t)i << 1); /* per-config seed */
+            seed_base ^ ((uint64_t)i << 1); /* per-config seed */
 
         for (uint64_t t = 0; t < trials; t++) {
             reset_kernel(h);

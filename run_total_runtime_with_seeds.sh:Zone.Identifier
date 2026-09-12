@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://claude.ai/chat/0cf2ee81-dcf4-4d04-8d97-47f266da1ede
+HostUrl=https://claude.ai/api/organizations/bc19af5c-030b-43a3-9c1e-e7a253f604ee/conversations/0cf2ee81-dcf4-4d04-8d97-47f266da1ede/wiggle/download-file?path=%2Fmnt%2Fuser-data%2Foutputs%2Fprod%2Frun_total_runtime.sh
