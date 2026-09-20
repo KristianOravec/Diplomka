@@ -1,0 +1,474 @@
+<?xml version="1.0"?>
+<TuningData>
+	<Metadata ComputeApi="CUDA" GlobalSizeType="OpenCL" Platform="NVIDIA CUDA" Device="NVIDIA GeForce RTX 5080 Laptop GPU" KttVersion="2.3.1" Timestamp="2026-09-20 18:14:25 UTC" TimeUnit="Microseconds" />
+	<Results>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="16157" TotalOverhead="30699.6" ExtraDuration="0" DataMovementOverhead="30617.8" ValidationOverhead="9.902" SearcherOverhead="71.872" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="16157" Overhead="51643.4" CompilationOverhead="51643.4">
+					<GlobalSize X="64" Y="128" Z="1" />
+					<LocalSize X="8" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="12288" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="44" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="16319.9" TotalOverhead="11828" ExtraDuration="0" DataMovementOverhead="11748.9" ValidationOverhead="7.849" SearcherOverhead="71.277" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="4" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="16319.9" Overhead="16577.1" CompilationOverhead="16577.1">
+					<GlobalSize X="64" Y="64" Z="1" />
+					<LocalSize X="16" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="39" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="10571.3" TotalOverhead="10686.3" ExtraDuration="0" DataMovementOverhead="10625.5" ValidationOverhead="4.967" SearcherOverhead="55.849" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="4" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="10571.3" Overhead="16299.9" CompilationOverhead="16299.9">
+					<GlobalSize X="64" Y="64" Z="1" />
+					<LocalSize X="8" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="62" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="37099.5" TotalOverhead="20353.6" ExtraDuration="0" DataMovementOverhead="20283.8" ValidationOverhead="7.055" SearcherOverhead="62.766" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="37099.5" Overhead="14646.9" CompilationOverhead="14646.9">
+					<GlobalSize X="128" Y="256" Z="1" />
+					<LocalSize X="32" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="4096" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="13942.9" TotalOverhead="11033.4" ExtraDuration="0" DataMovementOverhead="10964" ValidationOverhead="5.683" SearcherOverhead="63.658" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="13942.9" Overhead="17464.5" CompilationOverhead="17464.5">
+					<GlobalSize X="128" Y="64" Z="1" />
+					<LocalSize X="8" Y="32" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="4096" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="52106.6" TotalOverhead="12186.5" ExtraDuration="0" DataMovementOverhead="12120" ValidationOverhead="6.852" SearcherOverhead="59.666" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="52106.6" Overhead="15899.5" CompilationOverhead="15899.5">
+					<GlobalSize X="256" Y="256" Z="1" />
+					<LocalSize X="8" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="2048" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="24211.6" TotalOverhead="12483.3" ExtraDuration="0" DataMovementOverhead="12410.7" ValidationOverhead="6.31" SearcherOverhead="66.291" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="24211.6" Overhead="17282" CompilationOverhead="17282">
+					<GlobalSize X="128" Y="128" Z="1" />
+					<LocalSize X="16" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="0" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="38" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="23660.8" TotalOverhead="12310.1" ExtraDuration="0" DataMovementOverhead="12252.2" ValidationOverhead="5.714" SearcherOverhead="52.174" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="23660.8" Overhead="15109.9" CompilationOverhead="15109.9">
+					<GlobalSize X="128" Y="128" Z="1" />
+					<LocalSize X="16" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="0" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="36" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="16882" TotalOverhead="12866.5" ExtraDuration="0" DataMovementOverhead="12804.4" ValidationOverhead="4.808" SearcherOverhead="57.225" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="16882" Overhead="15533.4" CompilationOverhead="15533.4">
+					<GlobalSize X="128" Y="64" Z="1" />
+					<LocalSize X="8" Y="32" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="12288" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="18498.6" TotalOverhead="13551.1" ExtraDuration="0" DataMovementOverhead="13494" ValidationOverhead="4.992" SearcherOverhead="52.154" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="18498.6" Overhead="16798.9" CompilationOverhead="16798.9">
+					<GlobalSize X="64" Y="128" Z="1" />
+					<LocalSize X="8" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="14580.4" TotalOverhead="12732.6" ExtraDuration="0" DataMovementOverhead="12672.9" ValidationOverhead="5.734" SearcherOverhead="53.968" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="14580.4" Overhead="17243.7" CompilationOverhead="17243.7">
+					<GlobalSize X="128" Y="64" Z="1" />
+					<LocalSize X="32" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="12288" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="33883.9" TotalOverhead="11934.2" ExtraDuration="0" DataMovementOverhead="11872" ValidationOverhead="6.118" SearcherOverhead="56.02" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="33883.9" Overhead="17656.7" CompilationOverhead="17656.7">
+					<GlobalSize X="128" Y="256" Z="1" />
+					<LocalSize X="32" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="2048" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="41624.4" TotalOverhead="12734.2" ExtraDuration="0" DataMovementOverhead="12657" ValidationOverhead="5.809" SearcherOverhead="71.363" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="41624.4" Overhead="15755.5" CompilationOverhead="15755.5">
+					<GlobalSize X="64" Y="256" Z="1" />
+					<LocalSize X="16" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="0" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="19472.4" TotalOverhead="11627" ExtraDuration="0" DataMovementOverhead="11571.5" ValidationOverhead="3.919" SearcherOverhead="51.532" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="19472.4" Overhead="14266.2" CompilationOverhead="14266.2">
+					<GlobalSize X="128" Y="128" Z="1" />
+					<LocalSize X="16" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="0" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="20847.6" TotalOverhead="12577.4" ExtraDuration="0" DataMovementOverhead="12508.5" ValidationOverhead="6.123" SearcherOverhead="62.724" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="20847.6" Overhead="15891.4" CompilationOverhead="15891.4">
+					<GlobalSize X="128" Y="64" Z="1" />
+					<LocalSize X="16" Y="32" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="39" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="21057.5" TotalOverhead="12545" ExtraDuration="0" DataMovementOverhead="12460.5" ValidationOverhead="6.989" SearcherOverhead="77.483" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="4" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="21057.5" Overhead="16470.6" CompilationOverhead="16470.6">
+					<GlobalSize X="256" Y="64" Z="1" />
+					<LocalSize X="8" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="46" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="11966.8" TotalOverhead="12692.8" ExtraDuration="0" DataMovementOverhead="12585.6" ValidationOverhead="4.965" SearcherOverhead="102.232" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="64" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="4" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="11966.8" Overhead="16161" CompilationOverhead="16161">
+					<GlobalSize X="128" Y="64" Z="1" />
+					<LocalSize X="16" Y="16" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="12288" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="40" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+		<KernelResult KernelName="Gemm" Timestamp="2026-09-20 18:08:36 UTC" Status="Ok" TotalDuration="9839.49" TotalOverhead="11833.7" ExtraDuration="0" DataMovementOverhead="11761.6" ValidationOverhead="5.215" SearcherOverhead="66.891" CompilationOverhead="0" ProfilingOverhead="0" PreciseMeasurementOverhead="0">
+			<Configuration>
+				<Pair ValueType="UnsignedInt" Name="KWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="KWI" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="MWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="MDIMA" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="VWM" Value="4" />
+				<Pair ValueType="UnsignedInt" Name="MDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="NWG" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="NDIMB" Value="16" />
+				<Pair ValueType="UnsignedInt" Name="VWN" Value="2" />
+				<Pair ValueType="UnsignedInt" Name="NDIMC" Value="8" />
+				<Pair ValueType="UnsignedInt" Name="PRECISION" Value="32" />
+				<Pair ValueType="UnsignedInt" Name="SA" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="SB" Value="1" />
+				<Pair ValueType="UnsignedInt" Name="STRM" Value="0" />
+				<Pair ValueType="UnsignedInt" Name="STRN" Value="0" />
+			</Configuration>
+			<ComputationResults>
+				<ComputationResult KernelFunction="gemm_fast" Duration="9839.49" Overhead="16747.4" CompilationOverhead="16747.4">
+					<GlobalSize X="128" Y="128" Z="1" />
+					<LocalSize X="8" Y="8" Z="1" />
+					<CompilationData MaxWorkGroupSize="1024" LocalMemorySize="8192" PrivateMemorySize="0" ConstantMemorySize="0" RegistersCount="56" />
+				</ComputationResult>
+			</ComputationResults>
+		</KernelResult>
+	</Results>
+</TuningData>

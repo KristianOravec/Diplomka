@@ -53,6 +53,7 @@ def run_evaluator(HW, file_name, total_kernel_runs, hist_HW, k, overhead, fit_st
         fit_start=fit_start,
         number_of_tests=number_of_tests
     )
+
     result = EvaluatorResult()
     lib.evaluator_run(ctypes.byref(params), ctypes.byref(result))
     return result
@@ -72,13 +73,13 @@ def experiment(file_name):
             writer = csv.writer(f)
             writer.writerow(["HW / # of runs / method / overhead", "Average extra runtime", "Extra runtime deviation", "Average GT TS", "GT TS deviation", "Average estimated TS", "Estimated TS deviation", "Average miss (tuning steps)"])
 
-    hist_HW = "680"
+    hist_HW = "1070"
     # Full configuration (can be slow)
-    hw_list = ["680", "750", "1070", "2080"]
+    hw_list = [ "750", "1070", "2080"]
     # hw_list = ["1070"]
-    kernel_run_number_list = ["10000", "10000000"]
+    kernel_run_number_list = ["10000", "1000000"] #as in thesis
     k_values = ["1.0", "0.0", "0.5"]
-    overhead_values = ["10000", "1000000"]
+    overhead_values = ["100000", "1000000"] # fixed 10k to 100k 
     hw_kernel_combinations = []
 
     for a in hw_list:
@@ -87,8 +88,11 @@ def experiment(file_name):
                 for d in overhead_values:
                     benchmark = file_name.replace("_output.csv", "")
                     if os.path.exists(DATA_PATH + benchmark + "/" + a + "-" + file_name):
+                        print(DATA_PATH + benchmark + "/" + a + "-" + file_name)
                         hw_kernel_combinations.append([a, b, c, d])
 
+    print("e")
+    print(hw_kernel_combinations)
     start_time = time.time()
 
     for hw_kernel_combination in hw_kernel_combinations:
@@ -141,4 +145,6 @@ def experiment(file_name):
                 writer = csv.writer(f)
                 writer.writerow(extrarow)
 
+
+print("hello")
 experiment("gemm-reduced_output.csv")

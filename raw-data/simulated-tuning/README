@@ -1,0 +1,5 @@
+This directory includes scripts to run simulated tuning with search method guided by performance counters.
+
+For instructions on how to run them, see associated paper.
+
+The autobench.py script needs to have *py scripts located here in the same folder, read raw tuning data from 'raw-autotuning-data' folder, read models from 'models' folder, and, depending on method, store result into one of 'benchmarks-exact', 'benchmarks-dt' and 'benchmarks-ls' folder (which must exist).

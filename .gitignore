@@ -43,9 +43,33 @@ Thumbs.db
 # Test output
 output/
 
-# Raw data (large, external)
-raw-data/
 
-# Benchmark results
-*.csv
-!python/*.csv
+
+
+ignore/
+
+validate_extended
+validate_total_runtime
+validate_tuner_api
+overtune_probe
+
+# CI-tuning session artifacts
+# Integration binaries
+ClTuneGemm
+test_historical_cache
+validate_total_runtime_dbg
+validate_total_runtime_rng
+
+# KTT integration artifacts
+*.deb
+
+
+# Temporary work dirs (pure artifacts)
+low_power_era/
+
+
+# Windows/WSL junk
+*:Zone.Identifier
+
+# LibreOffice lock files
+.~lock.*
