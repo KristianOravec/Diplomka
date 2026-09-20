@@ -3,23 +3,21 @@
 # run_all_seeds_parallel.sh -- multi-seed comparison for all modes, run
 #                              CONCURRENTLY across CPU cores.
 #
-# WHY THIS IS FASTER
-#   The harness's trial loop is serial, so one run uses ~1 core no matter how
-#   many you have. But every (mode, seed) pair is an INDEPENDENT process, so on
-#   a many-core machine they can all run at once. 3 modes x 5 seeds = 15
-#   concurrent runs; on a 24-core CPU the whole job takes about as long as the
-#   single slowest run instead of the sum of all of them.
-#
-#   No C changes are needed -- this launches multiple copies of the SAME binary.
-#
 # HOW THE CLOBBERING IS AVOIDED
 #   Each run gets its own working directory (work_<mode>_<seed>/) with raw-data
 #   symlinked in, so the per-run output files cannot overwrite each other.
 #
 # USAGE
-#   ./run_all_seeds_parallel.sh              # 1000 trials, all modes
-#   ./run_all_seeds_parallel.sh 300          # 300 trials
-#   ./run_all_seeds_parallel.sh 300 "live hist"
+#   ./run_all_seeds_parallel.sh                      # 1000 trials, all modes
+#   ./run_all_seeds_parallel.sh 300                  # 300 trials
+#   ./run_all_seeds_parallel.sh 300 "live hist"      # subset of modes
+#   ./run_all_seeds_parallel.sh 1000 hybrid random   # ONE mode, 5 random seeds
+#   ./run_all_seeds_parallel.sh 1000 hybrid "7 8 9"  # explicit seed list
+#
+# ARGS
+#   $1  trials  (default 1000)
+#   $2  modes   space-separated: live / hist / hybrid  (default: all three)
+#   $3  seeds   "1 2 3 4 5" (default) | "random" | any explicit list
 #
 # Run from the directory containing raw-data/.
 # =============================================================================
@@ -27,7 +25,26 @@ set -u
 
 TRIALS="${1:-1000}"
 MODES="${2:-live hist hybrid}"
-SEEDS="1 2 3 4 5"
+SEEDSPEC="${3:-1 2 3 4 5}"
+
+# SEEDSPEC controls which seeds are used:
+#   "1 2 3 4 5"  (default)  -- fixed, reproducible, comparable across runs
+#   "random"                -- 5 fresh seeds drawn from OS entropy, so this run
+#                              samples DIFFERENTLY from any previous one. Useful
+#                              when a mode is re-run separately and you do not
+#                              want to reuse the same five draws.
+if [ "$SEEDSPEC" = "random" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        SEEDS=$(python3 -c "import random; random.seed(); print(' '.join(str(x) for x in random.sample(range(1,100000),5)))")
+    else
+        SEEDS="$RANDOM $RANDOM $RANDOM $RANDOM $RANDOM"
+    fi
+    echo "random seeds: $SEEDS"
+    # record them -- the run is only reproducible if the seeds are written down
+    echo "$SEEDS" > seeds_used.txt
+else
+    SEEDS="$SEEDSPEC"
+fi
 
 SRC="src"; [ -f "tuner_api.h" ] && SRC="."
 
@@ -47,7 +64,7 @@ echo "building validate_total_runtime ..."
 gcc -O2 -fopenmp -I"$SRC" -o validate_total_runtime \
     "$SRC/validate_total_runtime.c" \
     "$SRC/tuner_api.c" "$SRC/evaluator.c" "$SRC/curvefit.c" \
-    "$SRC/csv.c" "$SRC/random.c" "$SRC/minicsv.c" \
+    "$SRC/csv.c" "$SRC/historical_cache.c" "$SRC/minicsv.c" \
     -lgsl -lgslcblas -llbfgs -lm || exit 1
 BIN="$(pwd)/validate_total_runtime"
 DATA="$(pwd)/raw-data"
@@ -72,8 +89,12 @@ for M in $MODES; do
         ln -s "$DATA" "$D/raw-data"          # share the data, don't copy it
         (
             cd "$D" || exit 1
+            T0=$(date +%s)
             "$BIN" "$TRIALS" "$M" "result.txt" "$S" > /dev/null 2>&1
-            echo "  done: $M seed $S  ($(date +%H:%M:%S))"
+            ELAPSED=$(( $(date +%s) - T0 ))
+            printf '%d\n' "$ELAPSED" > time.txt
+            printf '  done: %-8s seed %-3s %dm %02ds\n' "$M" "$S" \
+                $((ELAPSED / 60)) $((ELAPSED % 60))
         ) &
     done
 done
@@ -82,13 +103,13 @@ echo "waiting for all runs to finish ..."
 wait
 echo
 echo "all runs finished in $(( ($(date +%s) - START) / 60 )) min"
-echo
-
-# ---- collect each mode's five results into one table ----
 for M in $MODES; do
     FILES=""
+    TIMES=""
     for S in $SEEDS; do
         [ -f "work_${M}_${S}/result.txt" ] && FILES="$FILES work_${M}_${S}/result.txt"
+        T="work_${M}_${S}/time.txt"
+        [ -f "$T" ] && TIMES="$TIMES $(printf '%dm%02ds' $(($(cat "$T") / 60)) $(($(cat "$T") % 60)))"
     done
     [ -z "$FILES" ] && { echo "no results for $M"; continue; }
 
@@ -119,6 +140,7 @@ for M in $MODES; do
           printf "mean spread across seeds: %.2f pp over %d configs\n", tot/n, n;
           if (tot==0) printf "\n*** WARNING: all seeds identical -- binary ignores the seed ***\n";
       }' $FILES > "seeds_${M}.txt"
+    echo "run times (seed order $SEEDS): $TIMES" >> "seeds_${M}.txt"
     echo "=== $M ==="
     cat "seeds_${M}.txt"
     echo

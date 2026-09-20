@@ -1,0 +1,3 @@
+This directory contains pre-computed models that predict performance counters from values of tuning parameters. 
+
+For scripts to train these models, see Github repository of KTT, link https://github.com/Fillo7/KTT/releases/tag/v1.3-profile-searcher. To train models from raw data in this repository, the script generate_models.py located here can be used after downloading the scripts for training and modifying it to accommodate the directory structure.

@@ -1,0 +1,3 @@
+This directory includes only script histogram.py to process logs from real-time tuning.
+
+For instructions to run real-time tuning, see associated paper. The code is available in Github repository of KTT, link TODO.

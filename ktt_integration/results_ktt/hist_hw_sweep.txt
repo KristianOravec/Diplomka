@@ -1,0 +1,122 @@
+########## hist_hw = 680 ##########
++------------------------------------------------------------------------+
+| pool 5080   X=10000   mode=hybrid   overhead=16600 us                  |
+| hist_hw=680   trials=1000   seed=0                                     |
+| engine=c   statistical oracle stop = 185                               |
++========================================================================+
+|                                                                        |
+| [1] STOP STEP  (where the estimator decided to stop)                   |
+|       mean 65   median 42   range [41, 466]                            |
+|                                                                        |
+| [2] DECLINE vs PER-SAMPLE ORACLE   <- compare to C_decl%               |
+|       best possible stop on the SAME drawn run;                        |
+|       always >= 0, this is the harness's definition                    |
+|       mean  +17.62%   median  +12.26%                                  |
+|       p10    +0.99%   p90     +41.20%                                  |
+|                                                                        |
+| [3] DECLINE vs STATISTICAL ORACLE  (expectation over the pool)         |
+|       a lucky draw CAN beat it, so negative values are normal          |
+|       and it is NOT comparable to the C harness numbers                |
+|       mean   +9.35%   median   +6.25%                                  |
+|       p10   -11.17%   p90     +32.05%                                  |
+|                                                                        |
+| [4] CONFIG QUALITY                                                     |
+|       best found  mean 11.005 ms                                       |
+|       pool best        8.064 ms   (+36.5% off optimal)                 |
+|                                                                        |
++========================================================================+
+########## hist_hw = 750 ##########
++------------------------------------------------------------------------+
+| pool 5080   X=10000   mode=hybrid   overhead=16600 us                  |
+| hist_hw=750   trials=1000   seed=0                                     |
+| engine=c   statistical oracle stop = 185                               |
++========================================================================+
+|                                                                        |
+| [1] STOP STEP  (where the estimator decided to stop)                   |
+|       mean 90   median 64   range [61, 581]                            |
+|                                                                        |
+| [2] DECLINE vs PER-SAMPLE ORACLE   <- compare to C_decl%               |
+|       best possible stop on the SAME drawn run;                        |
+|       always >= 0, this is the harness's definition                    |
+|       mean  +12.27%   median   +8.36%                                  |
+|       p10    +0.96%   p90     +29.56%                                  |
+|                                                                        |
+| [3] DECLINE vs STATISTICAL ORACLE  (expectation over the pool)         |
+|       a lucky draw CAN beat it, so negative values are normal          |
+|       and it is NOT comparable to the C harness numbers                |
+|       mean   +4.40%   median   +3.77%                                  |
+|       p10   -12.39%   p90     +20.26%                                  |
+|                                                                        |
+| [4] CONFIG QUALITY                                                     |
+|       best found  mean 10.372 ms                                       |
+|       pool best        8.064 ms   (+28.6% off optimal)                 |
+|                                                                        |
++========================================================================+
+########## hist_hw = 1070 ##########
++------------------------------------------------------------------------+
+| pool 5080   X=10000   mode=hybrid   overhead=16600 us                  |
+| hist_hw=1070   trials=1000   seed=0                                    |
+| engine=c   statistical oracle stop = 185                               |
++========================================================================+
+|                                                                        |
+| [1] STOP STEP  (where the estimator decided to stop)                   |
+|       mean 43   median 27   range [27, 321]                            |
+|                                                                        |
+| [2] DECLINE vs PER-SAMPLE ORACLE   <- compare to C_decl%               |
+|       best possible stop on the SAME drawn run;                        |
+|       always >= 0, this is the harness's definition                    |
+|       mean  +24.97%   median  +18.90%                                  |
+|       p10    +1.03%   p90     +58.71%                                  |
+|                                                                        |
+| [3] DECLINE vs STATISTICAL ORACLE  (expectation over the pool)         |
+|       a lucky draw CAN beat it, so negative values are normal          |
+|       and it is NOT comparable to the C harness numbers                |
+|       mean  +16.13%   median  +13.09%                                  |
+|       p10   -10.40%   p90     +49.52%                                  |
+|                                                                        |
+| [4] CONFIG QUALITY                                                     |
+|       best found  mean 11.809 ms                                       |
+|       pool best        8.064 ms   (+46.4% off optimal)                 |
+|                                                                        |
++========================================================================+
+########## hist_hw = 2080 ##########
++------------------------------------------------------------------------+
+| pool 5080   X=10000   mode=hybrid   overhead=16600 us                  |
+| hist_hw=2080   trials=1000   seed=0                                    |
+| engine=c   statistical oracle stop = 185                               |
++========================================================================+
+|                                                                        |
+| [1] STOP STEP  (where the estimator decided to stop)                   |
+|       mean 90   median 64   range [61, 581]                            |
+|                                                                        |
+| [2] DECLINE vs PER-SAMPLE ORACLE   <- compare to C_decl%               |
+|       best possible stop on the SAME drawn run;                        |
+|       always >= 0, this is the harness's definition                    |
+|       mean  +12.27%   median   +8.36%                                  |
+|       p10    +0.96%   p90     +29.56%                                  |
+|                                                                        |
+| [3] DECLINE vs STATISTICAL ORACLE  (expectation over the pool)         |
+|       a lucky draw CAN beat it, so negative values are normal          |
+|       and it is NOT comparable to the C harness numbers                |
+|       mean   +4.40%   median   +3.77%                                  |
+|       p10   -12.39%   p90     +20.26%                                  |
+|                                                                        |
+| [4] CONFIG QUALITY                                                     |
+|       best found  mean 10.372 ms                                       |
+|       pool best        8.064 ms   (+28.6% off optimal)                 |
+|                                                                        |
++========================================================================+
+########## hist_hw = 5080 ##########
+pool 5080: 5788 configs, mean 39.89 ms, best 8.064 ms
+X=10000, mode=hybrid, overhead=16600 us, trials=1000
+statistical oracle: stop 185, T* = 103.360 s (c_step = 39.89 + 16.60 ms)
+
+Traceback (most recent call last):
+  File "/home/kristian/Diplomka/python/../results_ktt/monte_carlo_vs_oracle.py", line 437, in <module>
+    main()
+    ~~~~^^
+  File "/home/kristian/Diplomka/python/../results_ktt/monte_carlo_vs_oracle.py", line 372, in main
+    dts = history(hist_hw, "gemm-reduced_output.csv", args.x, args.overhead)
+  File "/home/kristian/Diplomka/python/evaluator.py", line 45, in history
+    running_costs = np.multiply(best_so_far, running_costs, dtype=np.int64)# vector product of best_so_far & running_costs
+numpy._core._exceptions._UFuncInputCastingError: Cannot cast ufunc 'multiply' input 0 from dtype('float64') to dtype('int64') with casting rule 'same_kind'

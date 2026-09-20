@@ -1,14 +1,12 @@
 /* =============================================================================
- * evaluator.c  -- implementation of the batch Monte Carlo evaluator and
- * helpers.
+ * evaluator.c  -- implementation of the batch Monte Carlo evaluator and helpers.
  *
  * Implements evaluator_run (average metrics over many trials), history_run
- * (historical optimum O_hist), get_regression_params (historical curve fit),
- * and recommend_tuning_length (the batch stopping rule the deployed API
- * mirrors). Public parameter docs live in evaluator.h; the comments here
- * explain the internals (sampling, the Monte Carlo loop, the cost model).
- * =============================================================================
- */
+ * (historical optimum O_hist), get_regression_params (historical curve fit), and
+ * recommend_tuning_length (the batch stopping rule the deployed API mirrors).
+ * Public parameter docs live in evaluator.h; the comments here explain the
+ * internals (sampling, the Monte Carlo loop, the cost model).
+ * ============================================================================= */
 
 #include <math.h>
 #include <stdio.h>
@@ -20,7 +18,6 @@
 #include "csv.h"
 #include "curvefit.h"
 #include "evaluator.h"
-#include "random.h"
 
 /* Large sentinel used while searching for minimum total runtime. TO-DO use
  * doubleMAX from float.h or smth */
@@ -36,16 +33,15 @@
 /* -----------------------------------------------------------------------------
  * RNG SELF-CHECK  (build with -DEVALUATOR_RNG_CHECK=1)
  *
- * Prints a short, screenshot-friendly report proving the Monte Carlo sampling
- * is genuinely random: that every trial gets its own seed, that no two trials
- * share one, and that the resulting stop steps actually vary. Off by default
- * and costs nothing when off.
+ * Prints a short, screenshot-friendly report proving the Monte Carlo sampling is
+ * genuinely random: that every trial gets its own seed, that no two trials share
+ * one, and that the resulting stop steps actually vary. Off by default and
+ * costs nothing when off.
  *
  *   gcc ... -DEVALUATOR_RNG_CHECK=1 ...
  *
  * Output goes to stderr so it never mixes into a harness's results on stdout.
- * ---------------------------------------------------------------------------
- */
+ * --------------------------------------------------------------------------- */
 #ifndef EVALUATOR_RNG_CHECK
 #define EVALUATOR_RNG_CHECK 0
 #endif
@@ -222,22 +218,21 @@ static uint64_t run_history_trial(const TuningData *data, uint64_t curve_limit,
 
     for (uint64_t i = 0; i < curve_limit; i++) {
         /* Draw a random runtime from the data (bootstrap sampling).
-        *
-        * SAMPLING NOTE (applies to every draw site in this file):
-        * This samples WITH replacement -- the same configuration can be drawn
-        * more than once in a run. The Python reference used pandas .sample(),
-        * which defaults to replace=False and therefore never repeats a
-        * configuration. Drawing 2000 from a pool of 5788 yields ~1690 distinct
-        * values here versus 2000 in Python.
-        *
-        * Measured effect on the average best-so-far curve: under 1% at every
-        * step (680 data, 300 tests), with the sign varying -- i.e. within
-        * noise. Kept as-is deliberately: sampling with replacement is standard
-        * bootstrap resampling, and switching would change every validated
-        * number in the project for a sub-1% difference.
-        *
-        * Do not "fix" this without re-running the full validation suite. */
-
+         *
+         * SAMPLING NOTE (applies to every draw site in this file):
+         * This samples WITH replacement -- the same configuration can be drawn
+         * more than once in a run. The Python reference used pandas .sample(),
+         * which defaults to replace=False and therefore never repeats a
+         * configuration. Drawing 2000 from a pool of 5788 yields ~1690 distinct
+         * values here versus 2000 in Python.
+         *
+         * Measured effect on the average best-so-far curve: under 1% at every
+         * step (680 data, 300 tests), with the sign varying -- i.e. within
+         * noise. Kept as-is deliberately: sampling with replacement is standard
+         * bootstrap resampling, and switching would change every validated
+         * number in the project for a sub-1% difference.
+         *
+         * Do not "fix" this without re-running the full validation suite. */
         double sample =
             data->data[random_index_from_state(data->size, rng_state)];
         cumsum += sample;
@@ -273,7 +268,8 @@ run_monte_carlo_test(const TuningData *data, uint64_t curve_limit,
     /* Use this thread's reusable scratch buffer for the synthetic run. */
     double *tuning_run = ws->tuning_run;
 
-    /* Build the syntethic run: curve_limit random draws from the real data. */
+    /* Build the syntethic run: curve_limit random draws from the real data.
+     * With replacement -- see the SAMPLING NOTE above run_oracle_scan(). */
     for (uint64_t i = 0; i < curve_limit; i++)
         tuning_run[i] =
             data->data[random_index_from_state(data->size, rng_state)];
@@ -538,10 +534,41 @@ uint64_t history_run(const char *HW, const char *file_name,
  * 3. Fits curve to average (lines 93-97 in Python)
  * 4. Returns a, b parameters (lines 99-101 in Python)
  */
+/* =============================================================================
+ * get_regression_params -- learn the SHAPE of the convergence curve on one
+ * piece of hardware, so it can be frozen and reused on another (k=0 mode).
+ *
+ * THE IDEA
+ *   A single simulated tuning run produces a jagged, luck-dependent best-so-far
+ *   curve. Averaging many runs point-by-point gives one smooth curve that is
+ *   representative of this hardware. We fit f(x) = b/x^a + c to THAT average.
+ *   The caller keeps a and b -- the shape -- and transplants them onto a
+ *   different GPU, refitting only the floor c against live data. That is the
+ *   "frozen curve" of the historical mode.
+ *
+ * WHY AVERAGE FIRST, THEN FIT (rather than fit each run and average the a,b,c)
+ *   Fitting noisy single-run data yields unstable parameters, and the occasional
+ *   wild fit would skew the mean. Averaging the DATA first produces a smooth,
+ *   well-behaved curve that fits cleanly -- one robust fit beats a thousand
+ *   shaky ones.
+ *
+ *   HW              : [in]  historical hardware id, e.g. "1070".
+ *   file_name       : [in]  data file, e.g. "gemm-reduced_output.csv".
+ *   total_kernel_runs:[in]  #E, only used to cap the curve length.
+ *   fit_start       : [in]  skip this many noisy warmup points before fitting.
+ *   number_of_tests : [in]  how many runs to average (typically 1000).
+ *   params          : [out] receives the fitted a, b, c. On ANY failure this is
+ *                           filled with neutral defaults (a=0.5, b=1, c=0) and
+ *                           the function returns early -- callers get usable
+ *                           values rather than garbage.
+ *
+ * Mirrors Python's get_history_regression_parameters(); the "Lines NN" comments
+ * below refer to that function.
+ * ============================================================================= */
 void get_regression_params(const char *HW, const char *file_name,
                            uint64_t total_kernel_runs, uint64_t fit_start,
                            uint64_t number_of_tests, CurveParams *params) {
-    /* Load historical data */
+    /* ---- load the historical hardware's measured runtimes ---- */
     char path[512];
     build_data_path(HW, file_name, path, sizeof(path));
     TuningData data = csv_load(path, "Computation duration (us)");
@@ -583,37 +610,73 @@ void get_regression_params(const char *HW, const char *file_name,
         return;
     }
 
-    /* build the AVERAGE convergence curve over `number_of_tests` runs
+    /* ---- build the AVERAGE convergence curve over `number_of_tests` runs ----
      * avg_curve[j] ends up holding the mean best-so-far runtime at step j,
      * averaged across every simulated run. */
     for (uint64_t test = 0; test < number_of_tests; test++) {
-        /* Lines 77-78 in Python: Sample tuning_run */
+        /* Lines 77-78 in Python: draw one synthetic tuning run.
+         * With replacement -- see the SAMPLING NOTE earlier in this file.
+         *
+         * Per-test SALTED seed, same scheme as history_run and the main
+         * evaluator loop. Previously this drew from the shared global GSL RNG
+         * (random.c), whose state advances across calls -- so identical inputs
+         * returned different parameters depending on how many prior calls the
+         * process had made (pure execution-order dependence). Seeding each
+         * trial from (test, REGRESSION_SEED_SALT) makes the result a pure
+         * function of the inputs: reproducible, order-independent, and
+         * thread-safe by construction. */
+        uint64_t rng_state = make_test_seed(test, REGRESSION_SEED_SALT);
         for (uint64_t i = 0; i < curve_limit; i++)
-            /* NOTE: samples WITH replacement (bootstrap). The Python reference used
-             * pandas .sample(), which draws WITHOUT replacement, so it never repeats a
-             * configuration within one run. Measured effect on the average best-so-far
-             * curve: under 1% at all steps (680 data, 300 tests). Kept as-is because
-             * bootstrap is the standard resampling method and changing it would
-             * invalidate the existing validation numbers. */
-            tuning_run[i] = data.data[random_index(data.size)];
+            tuning_run[i] =
+                data.data[random_index_from_state(data.size, &rng_state)];
 
-        /* Lines 84-91 in Python: Running average of best_so_far */
+        /* Lines 84-91 in Python: fold this run's best-so-far curve into the
+         * running average. The incremental mean
+         *     new_avg = (old_avg * test + value) / (test + 1)
+         * lets us average all runs without storing them: `test` is the count of
+         * runs already folded in, `test + 1` the count including this one.
+         * (avg_curve was calloc'd to zero, so on test 0 this reduces to
+         * new_avg = value -- which is why no special first-iteration branch is
+         * needed here, unlike the Python.) */
         avg_curve[0] = (avg_curve[0] * test + tuning_run[0]) / (test + 1);
-        double running_min = tuning_run[0];
+        double running_min = tuning_run[0]; /* best seen so far in THIS run */
         for (uint64_t j = 1; j < curve_limit; j++) {
             if (tuning_run[j] < running_min)
-                running_min = tuning_run[j];
-            /* the curve only ever descends */
+                running_min = tuning_run[j]; /* the curve only ever descends */
             avg_curve[j] = (avg_curve[j] * test + running_min) / (test + 1);
         }
     }
 
+    /* ---- fit f(x) = b/x^a + c to the averaged curve ----
+     * Lines 93-97 in Python (scipy.optimize.curve_fit).
+     *
+     * WHY NO_HISTORICAL_DATA HERE, EVEN THOUGH THIS IS THE HISTORICAL FIT:
+     * the two "historical" names mean different things.
+     *   TUNER_MODE_HISTORICAL = what the tuner does LATER (reuse a frozen curve)
+     *   NO_HISTORICAL_DATA    = "this particular call has no a,b to freeze"
+     * This function is what CREATES the frozen curve, so it must fit from
+     * scratch -- there is nothing to inherit yet. Both sentinels therefore
+     * select curve_fit's "fit everything" mode: a, b AND c all come out of the
+     * Levenberg-Marquardt fit.
+     *
+     * The a,b produced here are stored as hist_a/hist_b by initiate_kernel and
+     * passed back into curve_fit on every live tuning step -- that later call
+     * DOES supply them, selecting the frozen-curve mode. Same function, opposite
+     * arguments: once to MAKE the curve, once to USE it.
+     *
+     * NOTE: a, b, c are pure OUTPUT parameters -- curve_fit overwrites them in
+     * every mode and never reads the values passed in. The initialisers below
+     * are therefore redundant; they merely duplicate the starting guesses
+     * curve_fit already uses internally (CURVEFIT_INITIAL_DECAY,
+     * CURVEFIT_INITIAL_SCALE, and the last point of the curve for c). Kept only
+     * so the declaration reads as a complete statement of intent. */
     double *x_cache = get_x_cache();
     double a = 0.5, b = 1.0, c = avg_curve[curve_limit - 1];
     curve_fit(x_cache, avg_curve, curve_limit, fit_start, &a, &b, &c,
               NO_HISTORICAL_DATA, NO_HISTORICAL_DATA);
 
-    /* Cleanup */
+    /* Hand back all three, though callers typically use only a and b (the
+     * shape); c is refit against live data on the target hardware. */
     params->a = a;
     params->b = b;
     params->c = c;
@@ -750,22 +813,23 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result) {
 #if EVALUATOR_RNG_CHECK
     {
         uint64_t n = params->number_of_tests;
-        /* 1. are all per-trial seeds distinct? (a collision would mean two
-         *    trials silently ran the identical sampled run) */
+
+        /* --- CHECK 1: are all per-trial seeds distinct? ---
+         * A collision means two trials replayed the IDENTICAL sampled run, so
+         * the effective sample count is lower than `n` and the averages are
+         * quietly over-confident. O(n^2), so keep trial counts small here. */
         uint64_t dup = 0;
         for (uint64_t i = 0; i < n; i++)
             for (uint64_t j = i + 1; j < n; j++)
-                if (rngchk_seed[i] == rngchk_seed[j]) {
-                    dup++;
-                    break;
-                }
-        /* 2. did the resulting stop steps actually vary? */
+                if (rngchk_seed[i] == rngchk_seed[j]) { dup++; break; }
+
+        /* --- CHECK 2: did the sampling actually change the OUTCOME? ---
+         * Spread of the stop steps. sd == 0 would mean every trial behaved
+         * identically, i.e. the sampling had no effect at all. */
         double mn = rngchk_est[0], mx = rngchk_est[0], sum = 0, sum2 = 0;
         for (uint64_t i = 0; i < n; i++) {
-            if (rngchk_est[i] < mn)
-                mn = rngchk_est[i];
-            if (rngchk_est[i] > mx)
-                mx = rngchk_est[i];
+            if (rngchk_est[i] < mn) mn = rngchk_est[i];
+            if (rngchk_est[i] > mx) mx = rngchk_est[i];
             sum += rngchk_est[i];
             sum2 += rngchk_est[i] * rngchk_est[i];
         }
@@ -773,30 +837,74 @@ void evaluator_run(const EvaluatorParams *params, EvaluatorResult *result) {
         double var = sum2 / (double)n - mean * mean;
         double sd = (var > 0) ? sqrt(var) : 0.0;
 
+        /* --- CHECK 3: are the DRAWS THEMSELVES uniform over the pool? ---
+         * Checks 1-2 can both pass with a badly skewed generator (e.g. one that
+         * only ever returns indices from the first tenth of the data). Here we
+         * replay one trial's draw sequence and bucket the indices into deciles.
+         * A uniform generator puts ~10% in each; a skewed one clusters.
+         * `max_dev` is the largest deviation from the expected 10%. */
+        uint64_t buckets[10] = {0};
+        uint64_t probe_draws = curve_limit;
+        uint64_t probe_state = make_test_seed(0, EVALUATOR_SEED_SALT);
+        for (uint64_t i = 0; i < probe_draws; i++) {
+            uint64_t idx = random_index_from_state(data.size, &probe_state);
+            buckets[(idx * 10) / data.size]++;
+        }
+        double expect = (double)probe_draws / 10.0;
+        double max_dev = 0.0;
+        for (int bi = 0; bi < 10; bi++) {
+            double dev = fabs((double)buckets[bi] - expect) / expect;
+            if (dev > max_dev) max_dev = dev;
+        }
+
+        /* --- VERDICT ---
+         * All three must hold:
+         *   no seed collisions,
+         *   the stop steps genuinely spread (sd > 0.5 step, not merely max>min),
+         *   the draws are within 25% of uniform in every decile.
+         * The 25% band is deliberately loose: with only a few hundred draws,
+         * decile counts fluctuate by tens of percent purely by chance. */
+        int ok_seeds = (dup == 0);
+        int ok_spread = (sd > 0.5);
+        int ok_uniform = (max_dev < 0.25);
+
         EVAL_RNG_LOG("%s", "");
-        EVAL_RNG_LOG(
-            "+-- RNG SELF-CHECK (evaluator) -------------------------+");
-        EVAL_RNG_LOG("|  HW=%-5s runs=%-9llu k=%-4.1f oh=%-8llu       |",
+        EVAL_RNG_LOG("+-- RNG SELF-CHECK (evaluator) ----------------------------+");
+        EVAL_RNG_LOG("|  config : HW=%s runs=%llu k=%.1f oh=%llu",
                      params->HW, (unsigned long long)params->total_kernel_runs,
                      params->k, (unsigned long long)params->overhead);
-        EVAL_RNG_LOG("|  trials: %-6llu                                     |",
-                     (unsigned long long)n);
-        EVAL_RNG_LOG(
-            "|  seeds  : first 3 = %llu, %llu, %llu",
-            (unsigned long long)(rngchk_seed[0] % 1000000),
-            (unsigned long long)(rngchk_seed[n > 1 ? 1 : 0] % 1000000),
-            (unsigned long long)(rngchk_seed[n > 2 ? 2 : 0] % 1000000));
-        EVAL_RNG_LOG("|  seeds  : duplicates = %llu  -> %s",
-                     (unsigned long long)dup,
-                     dup == 0 ? "ALL DISTINCT (ok)" : "COLLISION (BAD)");
-        EVAL_RNG_LOG("|  stops  : min=%.0f max=%.0f mean=%.1f sd=%.1f", mn, mx,
-                     mean, sd);
-        EVAL_RNG_LOG("|  verdict: %s",
-                     (dup == 0 && mx > mn)
-                         ? "RANDOMNESS ACTIVE (seeds unique, stops vary)"
-                         : "NOT RANDOM (identical seeds or constant stop)");
-        EVAL_RNG_LOG(
-            "+-------------------------------------------------------+");
+        EVAL_RNG_LOG("|  trials : %llu", (unsigned long long)n);
+        EVAL_RNG_LOG("|");
+        EVAL_RNG_LOG("|  [1] seed uniqueness  (two trials must never share a seed)");
+        EVAL_RNG_LOG("|      first 3 seeds  : %llu, %llu, %llu",
+                     (unsigned long long)(rngchk_seed[0] % 1000000),
+                     (unsigned long long)(rngchk_seed[n > 1 ? 1 : 0] % 1000000),
+                     (unsigned long long)(rngchk_seed[n > 2 ? 2 : 0] % 1000000));
+        EVAL_RNG_LOG("|      duplicates     : %llu    -> %s",
+                     (unsigned long long)dup, ok_seeds ? "PASS" : "FAIL");
+        EVAL_RNG_LOG("|");
+        EVAL_RNG_LOG("|  [2] outcome spread  (sampling must change the result)");
+        EVAL_RNG_LOG("|      stop steps     : min=%.0f max=%.0f mean=%.1f sd=%.1f",
+                     mn, mx, mean, sd);
+        EVAL_RNG_LOG("|                     -> %s", ok_spread ? "PASS" : "FAIL");
+        EVAL_RNG_LOG("|");
+        EVAL_RNG_LOG("|  [3] draw uniformity (pool must be sampled evenly)");
+        EVAL_RNG_LOG("|      %llu draws by decile:", (unsigned long long)probe_draws);
+        EVAL_RNG_LOG("|      %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu  (expect ~%.0f each)",
+                     (unsigned long long)buckets[0], (unsigned long long)buckets[1],
+                     (unsigned long long)buckets[2], (unsigned long long)buckets[3],
+                     (unsigned long long)buckets[4], (unsigned long long)buckets[5],
+                     (unsigned long long)buckets[6], (unsigned long long)buckets[7],
+                     (unsigned long long)buckets[8], (unsigned long long)buckets[9],
+                     expect);
+        EVAL_RNG_LOG("|      worst deviation: %.1f%%  -> %s",
+                     100.0 * max_dev, ok_uniform ? "PASS" : "FAIL");
+        EVAL_RNG_LOG("|");
+        EVAL_RNG_LOG("|  VERDICT: %s",
+                     (ok_seeds && ok_spread && ok_uniform)
+                         ? "RANDOMNESS ACTIVE AND WELL-BEHAVED"
+                         : "PROBLEM DETECTED -- see the FAIL line(s) above");
+        EVAL_RNG_LOG("+----------------------------------------------------------+");
         EVAL_RNG_LOG("%s", "");
         free(rngchk_seed);
         free(rngchk_est);

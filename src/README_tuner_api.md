@@ -53,7 +53,7 @@ release_kernel(h);
 
 ```sh
 gcc -O2 -fPIC -shared -fopenmp -o libtuner.so \
-    tuner_api.c evaluator.c curvefit.c csv.c random.c minicsv.c \
+    tuner_api.c evaluator.c curvefit.c csv.c minicsv.c \
     -lgsl -lgslcblas -llbfgs -lm
 ```
 

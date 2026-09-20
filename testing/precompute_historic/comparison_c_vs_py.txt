@@ -1,0 +1,76 @@
+C table:     historical_params_c.csv
+Python table: historical_params_py.csv
+generated:    2026-09-20 19:26:12
+
+comparing historical_params_c.csv (C) vs historical_params_py.csv (Py), 34 common keys
+kind   hw              runs discriminator                     C value                 Py value               difference
+--------------------------------------------------------------------------------------------------------------
+OPT    1070           10000 oh=100                                163                      159                       -4
+OPT    1070           10000 oh=1000                               133                      136                       +3
+OPT    1070           10000 oh=10000                               50                       49                       -1
+OPT    1070           10000 oh=100000                               9                        9                       +0
+OPT    1070           10000 oh=1000000                              3                        3                       +0
+OPT    1070         1000000 oh=100                                930                      951                      +21
+OPT    1070         1000000 oh=1000                               897                      921                      +24
+OPT    1070         1000000 oh=10000                              679                      666                      -13
+OPT    1070         1000000 oh=100000                             205                      217                      +12
+OPT    1070         1000000 oh=1000000                             55                       55                       +0
+OPT    1070        10000000 oh=100                                954                      981                      +27
+OPT    1070        10000000 oh=1000                               954                     1008                      +54
+OPT    1070        10000000 oh=10000                              941                      958                      +17
+OPT    1070        10000000 oh=100000                             712                      720                       +8
+OPT    1070        10000000 oh=1000000                            206                      211                       +5
+OPT    680            10000 oh=100                                134                      130                       -4
+OPT    680            10000 oh=1000                               121                      122                       +1
+OPT    680            10000 oh=10000                               66                       70                       +4
+OPT    680            10000 oh=100000                              20                       20                       +0
+OPT    680            10000 oh=1000000                              5                        6                       +1
+OPT    680          1000000 oh=100                                846                      919                      +73
+OPT    680          1000000 oh=1000                               842                      899                      +57
+OPT    680          1000000 oh=10000                              797                      830                      +33
+OPT    680          1000000 oh=100000                             385                      368                      -17
+OPT    680          1000000 oh=1000000                             86                       93                       +7
+OPT    680         10000000 oh=100                                908                      961                      +53
+OPT    680         10000000 oh=1000                               908                     1003                      +95
+OPT    680         10000000 oh=10000                              895                      955                      +60
+OPT    680         10000000 oh=100000                             829                      862                      +33
+OPT    680         10000000 oh=1000000                            395                      391                       -4
+REG    1070              -1 fs=10 a                      0.5047395709             0.4828313827               -4.340493%
+REG    1070              -1 fs=10 b                   1029.8045113407          1009.0072621999               -2.019534%
+REG    1070              -1 fs=15 a                      0.5312597663             0.4946638517               -6.888516%
+REG    1070              -1 fs=15 b                   1134.7865062292          1043.2178069139               -8.069245%
+REG    680               -1 fs=10 a                      0.5561141664             0.5302894843               -4.643773%
+REG    680               -1 fs=10 b                   3326.0031028533          3065.1976341427               -7.841408%
+REG    680               -1 fs=15 a                      0.5700557214             0.5190711020               -8.943796%
+REG    680               -1 fs=15 b                   3503.1197660977          2944.3909156094              -15.949465%
+--------------------------------------------------------------------------------------------------------------
+  a   |rel %|  mean     6.2041  median     5.7661  max     8.9438   SIGNED mean   -6.2041
+  b   |rel %|  mean     8.4699  median     7.9553  max    15.9495   SIGNED mean   -8.4699
+  O_hist |steps| mean    21.0333  median    10.0000  max    95.0000   SIGNED mean  +18.1667
+  O_hist  Py > C in 20/30 rows
+
+INTERPRETATION
+  Use the SIGNED means, not just the magnitudes: a signed mean
+  near zero means the engines disagree only by sampling noise,
+  while a consistent sign means a real systematic difference.
+
+  REG rows (frozen curve a, b)
+    total_kernel_runs is NOT part of this key. The fit uses
+    curve_limit = min(runs, pool size, CURVE_LIMIT_MAX), so every
+    runs >= 2000 is the SAME computation. Both precompute scripts
+    therefore emit ONE row per (hw, fit_start) with
+    total_kernel_runs = -1 (= any runs >= CURVE_LIMIT_MAX), so you
+    should see 4 REG rows here, not 12.
+    If a table still carries one row per runs value it predates
+    that change: its repeated a,b are correct but redundant, and
+    any VARIATION across them is a seeding artifact, not an engine
+    difference.
+
+  OPT rows (historical optimum O_hist)
+    A systematic Py > C bias is EXPECTED. Python samples WITHOUT
+    replacement (pandas .sample defaults to replace=False, giving
+    curve_limit distinct configs); the C samples WITH replacement
+    (~1690 distinct of 2000 drawn from a 5788 pool). Exploring
+    more distinct configs finds a better minimum, pushing the
+    cost-model optimum LATER -- hence larger O_hist in Python.
+    Documented in evaluator.c (SAMPLING NOTE).

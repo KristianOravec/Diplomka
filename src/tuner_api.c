@@ -15,7 +15,8 @@
 
 #include "tuner_api.h"
 #include "curvefit.h" /* curve_fit, minimize_total_runtime_tuner, curve_eval */
-#include "evaluator.h" /* CURVE_LIMIT_MAX, NO_HISTORICAL_DATA, history_run, get_regression_params */
+#include "evaluator.h"
+#include "historical_cache.h" /* CURVE_LIMIT_MAX, NO_HISTORICAL_DATA, history_run, get_regression_params */
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,8 +53,7 @@
  *
  *   gcc ... -DTUNER_RNG_CHECK=1 ...    # one verdict line per kernel
  *   gcc ... -DTUNER_DEBUG=1 ...        # full per-step trace (verbose)
- * ---------------------------------------------------------------------------
- */
+ * --------------------------------------------------------------------------- */
 #ifndef TUNER_RNG_CHECK
 #define TUNER_RNG_CHECK 0
 #endif
@@ -139,8 +139,8 @@ struct KernelHandle {
      * only written inside TUNER_DEBUG guards). */
     double dbg_min_kernel, dbg_max_kernel; /* range of pushed kernel times */
     double dbg_sum_kernel;                 /* for the mean */
-    double dbg_last_kernel;    /* previous sample, to spot repeats */
-    uint64_t dbg_repeat_count; /* consecutive identical samples */
+    double dbg_last_kernel;                /* previous sample, to spot repeats */
+    uint64_t dbg_repeat_count;             /* consecutive identical samples */
 };
 
 /* returns the array [0,1,2,...,CURVE_LIMIT_MAX-1] used as the
@@ -216,23 +216,51 @@ KernelHandle *initiate_kernel(const KernelConfig *cfg, const char *debug_name,
 
     /* Resolve historical data for the non-LIVE modes -- done ONCE here, the
      * same way evaluator_run does it. */
+    /* PRECOMPUTED FIRST: these historical values depend only on the historical
+     * data and a few config fields -- never on the live run -- so they are
+     * computed once offline by precompute_historical.py and looked up here.
+     * Recomputing them per kernel cost seconds to minutes and returned the same
+     * answer every time. On a cache miss we fall back to computing, so a
+     * missing table costs speed but never correctness. */
     if (cfg->mode == TUNER_MODE_HISTORICAL) {
-        /* k == 0: fit the frozen curve from the historical GPU's raw data --
-         * a,b,c are computed here, not loaded. Keep only a,b (the shape, which
-         * transfers across hardware); cp.c is the historical GPU's floor and is
-         * discarded, since c is refit live on this kernel's own samples. */
-
-        CurveParams cp;
-        get_regression_params(cfg->hist_HW, cfg->file_name,
-                              cfg->total_kernel_runs, cfg->fit_start,
-                              cfg->hist_number_of_tests, &cp);
-        h->hist_a = cp.a;
-        h->hist_b = cp.b;
+        /* k == 0: frozen curve parameters a, b. */
+        double ca = 0, cb = 0;
+        if (historical_cache_lookup_regression(
+                cfg->hist_HW, cfg->file_name, cfg->total_kernel_runs,
+                cfg->fit_start, cfg->hist_number_of_tests, &ca, &cb)) {
+            h->hist_a = ca;
+            h->hist_b = cb;
+            TUNER_DBG(h->debug_name, "hist a,b from CACHE: a=%.4f b=%.4f", ca, cb);
+        } else {
+            CurveParams cp;
+            get_regression_params(cfg->hist_HW, cfg->file_name,
+                                  cfg->total_kernel_runs, cfg->fit_start,
+                                  cfg->hist_number_of_tests, &cp);
+            h->hist_a = cp.a;
+            h->hist_b = cp.b;
+            TUNER_DBG(h->debug_name,
+                      "hist a,b COMPUTED (cache miss): a=%.4f b=%.4f", cp.a, cp.b);
+        }
+        /* cp.c / the fitted c is discarded either way: it describes the
+         * HISTORICAL hardware's floor. c is refit live on this kernel's own
+         * samples every step (curve_fit frozen-curve mode). */
     } else if (cfg->mode == TUNER_MODE_HYBRID) {
-        /* 0 < k < 1: compute historical optimum O_hist for the backstop. */
-        h->hist_optimal_steps =
-            history_run(cfg->hist_HW, cfg->file_name, cfg->total_kernel_runs,
-                        cfg->overhead, cfg->hist_number_of_tests);
+        /* 0 < k < 1: historical optimum O_hist, the blending backstop. */
+        uint64_t o_hist = 0;
+        if (historical_cache_lookup_optimum(
+                cfg->hist_HW, cfg->file_name, cfg->total_kernel_runs,
+                cfg->overhead, cfg->hist_number_of_tests, &o_hist)) {
+            h->hist_optimal_steps = o_hist;
+            TUNER_DBG(h->debug_name, "O_hist from CACHE: %llu",
+                      (unsigned long long)o_hist);
+        } else {
+            h->hist_optimal_steps =
+                history_run(cfg->hist_HW, cfg->file_name,
+                            cfg->total_kernel_runs, cfg->overhead,
+                            cfg->hist_number_of_tests);
+            TUNER_DBG(h->debug_name, "O_hist COMPUTED (cache miss): %llu",
+                      (unsigned long long)h->hist_optimal_steps);
+        }
     }
     /* LIVE mode: nothing historical to resolve. */
 
@@ -308,13 +336,10 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
     uint64_t i = h->step + 1;
 #if TUNER_TRACK_INPUT
     /* accumulate the spread of pushed kernel times */
-    if (kernel_time_us < h->dbg_min_kernel)
-        h->dbg_min_kernel = kernel_time_us;
-    if (kernel_time_us > h->dbg_max_kernel)
-        h->dbg_max_kernel = kernel_time_us;
+    if (kernel_time_us < h->dbg_min_kernel) h->dbg_min_kernel = kernel_time_us;
+    if (kernel_time_us > h->dbg_max_kernel) h->dbg_max_kernel = kernel_time_us;
     h->dbg_sum_kernel += kernel_time_us;
-    if (kernel_time_us == h->dbg_last_kernel)
-        h->dbg_repeat_count++;
+    if (kernel_time_us == h->dbg_last_kernel) h->dbg_repeat_count++;
     h->dbg_last_kernel = kernel_time_us;
 #endif
     TUNER_DBG(h->debug_name, "push step=%llu kernel=%.1f total=%.1f",
@@ -391,9 +416,9 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
             {
                 double spread = h->dbg_max_kernel - h->dbg_min_kernel;
                 double mean = h->dbg_sum_kernel / (double)(i + 1);
-                const char *verdict = (spread > 0.0)
-                                          ? "VARIED (randomness real)"
-                                          : "CONSTANT INPUT -- RNG NOT WORKING";
+                const char *verdict =
+                    (spread > 0.0) ? "VARIED (randomness real)"
+                                   : "CONSTANT INPUT -- RNG NOT WORKING";
                 /* under TUNER_DEBUG this joins the trace; under TUNER_RNG_CHECK
                  * it is the ONLY line printed, one per kernel. */
                 TUNER_DBG(h->debug_name,

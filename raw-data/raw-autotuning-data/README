@@ -1,0 +1,3 @@
+This directory contains measured computation times and collected performance counters for complete tuning spaces of five benchmarks on four GPUs. 
+
+For code to generate such data, see Github repository of KTT, link https://github.com/Fillo7/KTT/releases/tag/v1.3-profile-searcher.
