@@ -29,6 +29,7 @@ sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt update
 sudo apt install cuda-toolkit-12-9        # RTX 50xx needs >= 12.8 (sm_120)
 # Python (3.12+): numpy, pandas, scipy
 # PEP 668: Ubuntu 24+ refuses plain pip (externally-managed); --user --break-system-packages installs to the user site
+# JUST USE VENV PLS 
 python3 -m pip install --user --break-system-packages numpy pandas scipy
 # KTT source:
 git clone https://github.com/HiPerCoRe/KTT.git ~/KTT
