@@ -96,26 +96,62 @@ g++ -O2 -std=c++17 -DKTT_CUDA_EXAMPLE=1 \
 echo "   built: $OUT"
 
 if [ "$BUILD_TEST" = "1" ]; then
-    echo "== 3. smoke validation (X=5 must NOT stop: warmup > X) ============="
+    echo "== 3. smoke validation (X=5 must NOT stop: warmup > X) =============="
     export LD_LIBRARY_PATH="$(dirname "$LIBKTT"):$CUDA_PATH/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    cd "$ROOT"
-    [ -n "$(pgrep -f ClTuneGemm || true)" ] && {
+    if pgrep -f "$OUT" >/dev/null 2>&1; then
         err "another ClTuneGemm is running -- kill it first (two GPU runs = garbage timings)"
-        exit 1; }
-    OUTFILE="$(mktemp)"
-    timeout 120 "$OUT" 0 0 "$KTT_ROOT/Examples/ClTuneGemm/ClTuneGemm.cu" \
-        "$KTT_ROOT/Examples/ClTuneGemm/ClTuneGemmReference.cu" 5 live \
-        > "$OUTFILE" 2>&1 || { err "smoke run crashed:"; tail -5 "$OUTFILE"; exit 1; }
+        exit 1
+    fi
+    # Run in a THROWAWAY directory. The binary writes tuning_steps_<tag>.csv
+    # and GemmOutput_<tag>.xml into its cwd; running in $ROOT would mix smoke
+    # output with real session files (and an earlier version of this test
+    # deleted files there). live mode reads no historical data, so it does not
+    # need raw-data/ to be reachable.
+    SMOKEDIR="$(mktemp -d /tmp/cltunegemm_smoke.XXXXXX)"
+    trap 'rm -rf "$OBJDIR" "$SMOKEDIR"' EXIT
+    OUTFILE="$SMOKEDIR/stdout.txt"
+    ( cd "$SMOKEDIR" && timeout 120 "$OUT" 0 0 \
+        "$KTT_ROOT/Examples/ClTuneGemm/ClTuneGemm.cu" \
+        "$KTT_ROOT/Examples/ClTuneGemm/ClTuneGemmReference.cu" \
+        5 live 680 rand ) > "$OUTFILE" 2>&1 \
+        || { err "smoke run crashed:"; tail -5 "$OUTFILE"; exit 1; }
+
+    # 1. with X=5 the library cannot stop (first decision is at fit_start+6),
+    #    so the budget must run out while still tuning
     grep -q "Execution budget spent while still tuning" "$OUTFILE" \
         || { err "smoke run did NOT produce the expected verdict:"; tail -8 "$OUTFILE"; exit 1; }
-    [ -s tuning_steps.csv ] || { err "tuning_steps.csv was not produced"; exit 1; }
-    STEPS=$(grep -c "" tuning_steps.csv)
-    rm -f tuning_steps.csv
-    echo "   PASS: X=5 ran, never stopped (warmup works), CSV produced ($STEPS lines incl. header)"
-    echo "   GPU stack + library + build all OK."
+
+    # 2. the run must announce its own conditions
+    grep -q "^CONFIG: X=5 mode=live" "$OUTFILE" \
+        || { err "CONFIG line missing -- is this the updated ClTuneGemm.cpp?"; exit 1; }
+
+    # 3. live mode must NOT trigger the hybrid/hist overhead warning
+    ! grep -q "WARNING: mode" "$OUTFILE" \
+        || { err "overhead warning fired in live mode (it should not)"; exit 1; }
+
+    # 4. the step log: the binary names it tuning_steps_<tag>.csv, NOT
+    #    tuning_steps.csv -- the previous check looked for the wrong name and
+    #    therefore failed on every correct build.
+    STEPFILE="$(ls "$SMOKEDIR"/tuning_steps_*.csv 2>/dev/null | head -1)"
+    [ -n "$STEPFILE" ] && [ -s "$STEPFILE" ] \
+        || { err "no tuning_steps_*.csv produced"; ls -la "$SMOKEDIR"; exit 1; }
+    STEPS=$(( $(wc -l < "$STEPFILE") - 1 ))
+    [ "$STEPS" -eq 5 ] \
+        || { err "expected 5 tuning steps in $(basename "$STEPFILE"), got $STEPS"; exit 1; }
+
+    # 5. total_us must equal kernel_us + overhead_us on every row (catches the
+    #    overhead=0 class of bug that invalidated an earlier session)
+    awk -F, 'NR>1 { d=$4-($2+$3); if (d>1 || d<-1) bad=1 } END { exit bad }' "$STEPFILE" \
+        || { err "total_us != kernel_us + overhead_us in $(basename "$STEPFILE")"; exit 1; }
+
+    echo "   PASS: X=5 ran without stopping, CONFIG line present, no spurious"
+    echo "         warning, $(basename "$STEPFILE") has $STEPS consistent rows."
+    echo "   GPU stack + KTT + library + build all OK."
 fi
 
 echo "== done. run e.g.: ==================================================="
 echo "  export LD_LIBRARY_PATH=$(dirname "$LIBKTT"):$CUDA_PATH/lib64"
 echo "  cd $ROOT && ./ClTuneGemm 0 0 $KTT_ROOT/Examples/ClTuneGemm/ClTuneGemm.cu \\"
-echo "      $KTT_ROOT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 1070 rand"
+echo "      $KTT_ROOT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 1070 rand - <overhead_us>"
+echo "  (hybrid/hist NEED the measured overhead as argv[10] -- e.g. the median"
+echo "   overhead_us of a reference sweep -- or O_hist comes out too deep.)"

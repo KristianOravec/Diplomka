@@ -32,9 +32,26 @@
 //
 // USAGE:
 //   ./ClTuneGemm [platform] [device] [kernelFile] [referenceKernelFile] \
-//                <X: #executions> [mode: live|hybrid|hist] [histHW]
-//   X is REQUIRED. Example: ./ClTuneGemm 0 0 ../Examples/ClTuneGemm/ClTuneGemm.cl \
-//       ../Examples/ClTuneGemm/ClTuneGemmReference.cl 10000 hybrid 680
+//                <X: #executions> [mode: live|hybrid|hist|ref] [histHW] \
+//                [searcher: rand|det] [fast] [overhead_us] [fit_start]
+//   X is REQUIRED. Example:
+//     ./ClTuneGemm 0 0 ClTuneGemm.cu ClTuneGemmReference.cu \
+//         10000 hybrid 1070 rand - 31742
+//   ("-" in the fast slot means "not fast"; anything other than "fast" works.)
+//
+// KNOWN LIMITATIONS (state these in any write-up)
+//   * Output validation is OFF (rapidTest). A configuration that is fast
+//     because it computes the WRONG result would not be rejected.
+//   * Step 1's measured cost includes one-off config-space initialisation and
+//     the matrix upload (~3x a normal step). It seeds the library's running
+//     mean, biasing the early cost estimate upward and hence toward stopping
+//     early; the effect decays as 1/step.
+//   * The historical cache keys O_hist (hybrid) on the EXACT overhead value.
+//     A measured overhead such as 31742 is not in the default precompute grid,
+//     so hybrid runs MISS the cache and recompute O_hist at init. Add the
+//     overhead you pass here to OVERHEAD_LIST in precompute_historical.py to
+//     get a cache hit. (Confirm with a -DTUNER_DEBUG=1 build: look for
+//     "O_hist from CACHE" vs "COMPUTED (cache miss)".)
 // =============================================================================
 
 #include <iostream>
@@ -65,7 +82,11 @@ const std::string kernelPrefix = "../";
     const auto computeApi = ktt::ComputeApi::OpenCL;
 #endif
 
-// Toggle rapid test (e.g., disable output validation).
+// Toggle rapid test. true DISABLES output validation: the reference kernel is
+// never compared against, so a configuration that is fast because it computes
+// the WRONG result would not be rejected (and could become "best"). Kept on
+// because validation makes every tuning step much slower; set false for one
+// sweep to confirm the fastest configurations produce correct output.
 const bool rapidTest = true;
 
 // Toggle kernel profiling.
@@ -115,7 +136,8 @@ int main(int argc, char** argv)
     {
         std::cerr << "Missing required argument: <X: number of CITuneGemm executions>\n";
         std::cerr << "Usage: " << argv[0] << " [platform] [device] [kernelFile] [referenceKernelFile]"
-                  << " <X> [mode: live|hybrid|hist] [histHW] [searcher: det|rand, default rand] [fast] [overhead_us]\n";
+                  << " <X> [mode: live|hybrid|hist|ref] [histHW] [searcher: rand|det, default rand]"
+                  << " [fast] [overhead_us] [fit_start, default 10]\n";
         return 1;
     }
     const uint64_t totalRuns = std::stoull(std::string(argv[5]));
@@ -126,9 +148,13 @@ int main(int argc, char** argv)
     }
     const std::string modeStr = (argc >= 7) ? argv[6] : "live";
     const std::string histHW = (argc >= 8) ? argv[7] : "680";
-    // Searcher selection: "rand" (DEFAULT) = RandomSearcher, deployment-style
-    // random sampling with replacement -- what vanilla KTT/CLTune use and what
-    // the harness simulations assume; every session is a fresh sample.
+    // Searcher selection: "rand" (DEFAULT) = RandomSearcher, random order over
+    // the configuration space. It samples WITHOUT replacement: a 5788-step
+    // random reference sweep produced 5737 distinct kernel times, whereas
+    // sampling WITH replacement would give only ~63% distinct (~3660). Note the
+    // offline harness samples WITH replacement (bootstrap), so the two are not
+    // identical -- the effect is small (<1% on the convergence curve) but it is
+    // a real difference, not a match.
     // "det" = DeterministicSearcher, fixed lexicographic order -- the analysis
     // instrument for paired-stream comparisons (cross_engine prefix property);
     // NOT reproducible-session-relevant since rand streams are not reproducible.
@@ -142,12 +168,26 @@ int main(int argc, char** argv)
     // Overhead (argv[10], us): feeds the HISTORICAL fit at init (history_run's
     // oracle scan prices each draw at kernel+overhead). The LIVE cost model is
     // unaffected -- it uses the per-step measured totals from push_result.
-    // Default 0 = old behavior (free historical steps -> O_hist too deep).
+    // Default 0 = tuning treated as free in the historical fit, which makes
+    // O_hist too deep. Harmless for live mode (no history used), WRONG for
+    // hybrid and hist -- see the warning after the mode is resolved.
     const uint64_t cfgOverhead = (argc >= 11) ? std::stoull(std::string(argv[10])) : 0;
+    // fit_start (argv[11]): warmup steps before the first curve fit. The
+    // library makes NO stop decision before step fit_start + 6, so at high
+    // overhead this -- not the fitted curve -- effectively sets the stop.
+    // Exposed as an argument so that effect can be measured directly.
+    const uint64_t fitStart = (argc >= 12) ? std::stoull(std::string(argv[11])) : 10;
+    // Matrix dimension is fixed at compile time by useProfiling. It is recorded
+    // in the output tag because mixing results from different sizes silently
+    // invalidates any comparison (2048^3 and 4096^3 differ ~8x in work).
+    constexpr uint32_t kMatSize = useProfiling ? 4096 / 2 : 4096;
     // Output files carry the full input signature, so runs never overwrite:
-    //   tuning_steps_<X>_<mode>_hist<hw>_<searcher>[_oh<overhead>][_fast].csv
+    //   tuning_steps_<X>_<mode>_hist<hw>_<searcher>_n<size>_fs<fit_start>
+    //                [_fast][_oh<overhead>].csv
     std::string tag = std::to_string(totalRuns) + "_" + modeStr + "_hist" + histHW
-                    + "_" + (useRandomSearcher ? "rand" : "det");
+                    + "_" + (useRandomSearcher ? "rand" : "det")
+                    + "_n" + std::to_string(kMatSize)
+                    + "_fs" + std::to_string(fitStart);
     if (fastMode) tag += "_fast";
     if (cfgOverhead > 0) tag += "_oh" + std::to_string(cfgOverhead);
 
@@ -169,22 +209,35 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // The historical inputs are priced with cfgOverhead. At 0 the fit treats
+    // tuning as free and O_hist comes out too deep -- a silent, wrong result.
+    if ((tunerMode == TUNER_MODE_HYBRID || tunerMode == TUNER_MODE_HISTORICAL)
+        && cfgOverhead == 0)
+    {
+        std::cerr << "WARNING: mode '" << modeStr << "' with overhead_us = 0 "
+                  << "(argv[10] not given).\n"
+                  << "         The historical fit will treat tuning as free and "
+                  << "O_hist will be too deep.\n"
+                  << "         Pass the measured per-step overhead, e.g. the "
+                  << "median overhead_us of a reference sweep.\n";
+    }
+
+    // One line summarising the run, so every log states its own conditions.
+    std::cout << "CONFIG: X=" << totalRuns << " mode=" << modeStr
+              << " hist=" << histHW << " searcher="
+              << (useRandomSearcher ? "rand" : "det")
+              << " n=" << kMatSize << " fit_start=" << fitStart
+              << " overhead_us=" << cfgOverhead
+              << (fastMode ? " fast" : "") << "\n";
+
     uint32_t kSizeM;
     uint32_t kSizeN;
     uint32_t kSizeK;
 
-    if constexpr (!useProfiling)
-    {
-        kSizeM = 4096;
-        kSizeN = 4096;
-        kSizeK = 4096;
-    }
-    else
-    {
-        kSizeM = 4096 / 2;
-        kSizeN = 4096 / 2;
-        kSizeK = 4096 / 2;
-    }
+    // Single source of truth: kMatSize (defined above, also in the tag).
+    kSizeM = kMatSize;
+    kSizeN = kMatSize;
+    kSizeK = kMatSize;
 
     const ktt::DimensionVector ndRangeDimensions(kSizeM, kSizeN);
     const ktt::DimensionVector workGroupDimensions;
@@ -331,15 +384,13 @@ int main(int argc, char** argv)
     cfg.total_kernel_runs = totalRuns; // X
     cfg.overhead = cfgOverhead;        // feeds the HISTORICAL fit; live cost model
                                        // uses per-step measured totals (push_result)
-    cfg.fit_start = 10;
-    // Historical data source: resolved at init from the PRECOMPUTED table
-    // (historical_params.csv, generated by src/precompute_historical.py) with
-    // a compute fallback on miss. See file header for TUNER_HISTORICAL_PARAMS.
+    cfg.fit_start = fitStart;
     cfg.mode = tunerMode;
     cfg.k = k;
     // Historical data source: resolved at init from the PRECOMPUTED table
     // (historical_params.csv, generated by src/precompute_historical.py) with
-    // a compute fallback on miss. See file header for TUNER_HISTORICAL_PARAMS.
+    // a compute fallback on miss. See file header for TUNER_HISTORICAL_PARAMS
+    // and the KNOWN LIMITATIONS note on O_hist cache misses.
     cfg.hist_HW = histHW.c_str();
     cfg.file_name = "gemm-reduced_output.csv";
     cfg.hist_number_of_tests = 1000;
@@ -352,18 +403,19 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Searcher choice:
-    //   det (default) -- DeterministicSearcher, FIXED order: a "ref" session
+    // Searcher choice (DEFAULT is rand -- see argv[8] parsing above):
+    //   det -- DeterministicSearcher, FIXED order: a "ref" session
     //     and a tuning session sample the SAME stream (the tuner session is a
     //     prefix of the reference), so decline% = T_est/T* - 1 is paired and
     //     >= 0 by construction. NOTE: lexicographic order is NOT random --
     //     it front-loads MWG=16 configs -- so paired-stream results carry a
     //     stream-order bias.
-    //   rand -- RandomSearcher, deployment-style sampling with replacement
-    //     from the whole pool: the same scheme the work_* harness simulations
-    //     assume. No stream pairing (T* must come from an EXHAUSTIVE ref
-    //     diary, which bounds every possible stream); this is the
-    //     apples-to-apples comparison against the harness numbers.
+    //   rand -- RandomSearcher, random order WITHOUT replacement over the
+    //     whole pool. Close to, but not identical with, the work_* harness,
+    //     which samples WITH replacement (see argv[8] note). No stream pairing
+    //     (T* must come from an EXHAUSTIVE ref diary, which bounds every
+    //     possible stream); this is the nearest real-hardware counterpart of
+    //     the harness numbers.
     if (useRandomSearcher)
         tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
     else
@@ -411,6 +463,7 @@ int main(int argc, char** argv)
                       << " us (config: " << best.GetConfiguration().GetString() << ")\n";
             tuner.SaveResults(refResults, "GemmOutput_" + tag, ktt::OutputFormat::XML);
         }
+        release_kernel(handle);   // was leaked: initiate_kernel ran above
         return 0;
     }
 
@@ -420,6 +473,11 @@ int main(int argc, char** argv)
     uint64_t runsDone = 0;      // executions consumed from X
     uint64_t tuningSteps = 0;   // of those, how many were tuning steps
     uint64_t failedIterations = 0;
+    // Wall time spent on FAILED configurations. It is real tuning cost, but a
+    // failed config yields no timing, so it is never pushed to the library and
+    // the cost model does not see it. Tracked here so the omission is visible
+    // in the summary rather than silent.
+    double failedWallUs = 0.0;
     const uint64_t failureCap = 1000; // safety against a pathological config space
     bool tuning = true;
     ktt::KernelConfiguration bestConfiguration{};
@@ -451,7 +509,8 @@ int main(int argc, char** argv)
             {
                 // Failed configs don't produce usable timing data; they also
                 // don't count as GEMM executions. Guard against a space that
-                // never succeeds.
+                // never succeeds. Their wall time is still accumulated.
+                failedWallUs += wallUs;
                 if (++failedIterations > failureCap)
                 {
                     std::cerr << "Too many failed tuning iterations, aborting tuning phase\n";
@@ -463,6 +522,10 @@ int main(int argc, char** argv)
             // clock); overhead = wall clock minus the kernel's own runtime.
             const double kernelTimeUs = static_cast<double>(result.GetKernelDuration()) / 1000.0;
             const double overheadUs = wallUs - kernelTimeUs;
+            // NOTE: on step 1, wallUs also contains one-off config-space
+            // initialisation and the matrix upload (~3x a normal step). It is
+            // pushed as-is because it IS real session cost, but it seeds the
+            // library's running mean high -- see KNOWN LIMITATIONS in the header.
             push_result(handle, kernelTimeUs, wallUs);
             ++runsDone;
             ++tuningSteps;
@@ -472,14 +535,16 @@ int main(int argc, char** argv)
             // comparison against the validate_total_runtime harness results
             // (work_* directories) in Python. Cumulative columns mirror the
             // cost model the library optimizes.
+            // Query the decision ONCE and use it for both the log and control
+            // flow, so the logged budget is guaranteed to be the one acted on.
+            const uint64_t remainingBudget = find_number_of_steps_that_should_be_tuning(handle);
+
             stepLog << tuningSteps << "," << kernelTimeUs << "," << overheadUs
                     << "," << kernelTimeUs + overheadUs << ","
                     << (kernelTimeUs < bestKernelUs ? 1 : 0) << ","
-                    << find_number_of_steps_that_should_be_tuning(handle) << "\n";
+                    << remainingBudget << "\n";
             if (kernelTimeUs < bestKernelUs)
                 bestKernelUs = kernelTimeUs;
-
-            const uint64_t remainingBudget = find_number_of_steps_that_should_be_tuning(handle);
             std::cout << "step " << tuningSteps << ": kernel " << kernelTimeUs << " us, overhead "
                       << overheadUs << " us, budget " << remainingBudget << "\n";
 
@@ -524,6 +589,10 @@ int main(int argc, char** argv)
                   << " us (config: " << best.GetConfiguration().GetString() << ")\n";
         std::cout << "Summary: X=" << totalRuns << ", tuning steps=" << tuningSteps
                   << ", production runs=" << (runsDone - tuningSteps) << "\n";
+        if (failedIterations > 0)
+            std::cout << "Failed configurations: " << failedIterations
+                      << " (" << failedWallUs / 1e6 << " s wall time, NOT seen by "
+                      << "the cost model)\n";
         tuner.SaveResults(tuningResults, "GemmOutput_" + tag, ktt::OutputFormat::XML);
     }
     else
