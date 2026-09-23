@@ -6,3 +6,5 @@ kernel_run_number_list = ["10000","10000000"]
 
 k_values = ["1.0","0.0","0.5"]
 overhead_values = ["10000","1000000"]
+
+duration roughly 14400 seconds
