@@ -8,3 +8,5 @@
     overhead_values = ["100","1000"]
 
 benchmark_suite_parallel.py
+
+duration roughly 13000 seconds
