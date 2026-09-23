@@ -1,0 +1,8 @@
+hist_HW = "GPU-1070" # the HW used to set the estimate
+hw_list = ["GPU-750", "GPU-1070", "GPU-2080"]
+#file_name_list = ["gemm_batch_output.csv","gemm_output.csv","conv_output.csv","reduction_output.csv"]
+
+kernel_run_number_list = ["10000","10000000"]
+
+k_values = ["1.0","0.0","0.5"]
+overhead_values = ["10000","1000000"]
