@@ -1,0 +1,11 @@
+hist_HW = "1070" # the HW used to set the estimate
+    hw_list = ["750","1070","2080"]
+    # hw_list = ["680", "750", "1070", "2080"]
+    #file_name_list = ["gemm_batch_output.csv","gemm_output.csv","conv_output.csv","reduction_output.csv"]
+
+    kernel_run_number_list = ["10000","1000000"]
+    k_values = ["1.0","0.0","0.5"] # k: emphasis on regression [0: no regression, 1: regression only, 0 < x < 1: hybrid] ale radsej sa spytaj este Jirku
+    # k_values = ["0.5"]
+    overhead_values = ["100000","1000000"] # natvrdo dany overhead
+
+Time 7400
