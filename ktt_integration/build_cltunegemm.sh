@@ -64,9 +64,9 @@ LIBKTT="$(find "$KTT_ROOT/Build" -name libktt.so 2>/dev/null | head -1)"
 for d in gcc g++ make; do
     have "$d" || { err "$d not found (apt install build-essential)"; exit 1; }
 done
-ldconfig -p 2>/dev/null | grep -q libgsl.so || {
+ldconfig -p 2>/dev/null | grep libgsl.so > /dev/null || {
     err "GSL not found (apt install libgsl-dev)"; exit 1; }
-ldconfig -p 2>/dev/null | grep -q liblbfgs || {
+ldconfig -p 2>/dev/null | grep liblbfgs > /dev/null || {
     err "libLBFGS not found (apt install liblbfgs-dev)"; exit 1; }
 [ -f "$CUDA_PATH/lib64/libcudart.so" ] || {
     err "libcudart not found under $CUDA_PATH/lib64"; exit 1; }
