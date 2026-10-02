@@ -18,10 +18,17 @@
 //      NVRTC compilation + searcher + host overhead); overhead = wall - kernel.
 //   4. Historical data is precomputed offline by Python
 //      (src/precompute_historical.py -> historical_params.csv) and loaded by
-//      the library's historical_cache at initiate_kernel() time -- nothing is
+//      historical_cache at initiate_kernel() time -- nothing is
 //      recomputed here. Point TUNER_HISTORICAL_PARAMS at the CSV or place it
 //      next to the binary. Historical CSV data itself must be reachable at
 //      raw-data/raw-autotuning-data/... relative to the CWD.
+//   5. Optional final argument "probe" = OVERTUNING PROBE mode. The tuner
+//      NEVER stops: it benchmarks configurations through the WHOLE X budget,
+//      records the shadow stop -- the step where the engine WOULD have
+//      stopped, visible as the first budget=0 row in the CSV -- plus the
+//      fresh per-step estimate (tuner_raw_recommendation, which ignores the
+//      library's stop latch) in the raw_est column. Offline regret analysis:
+//      testing/ktt_testing/analyze_probe.py.
 //
 // BUILD (from the KTT build tree that already produced libktt):
 //   g++ -O2 -std=c++17 -I<KTT>/include -I<Diplomka>/src \
@@ -33,19 +40,20 @@
 // USAGE:
 //   ./ClTuneGemm [platform] [device] [kernelFile] [referenceKernelFile] \
 //                <X: #executions> [mode: live|hybrid|hist|ref] [histHW] \
-//                [searcher: rand|det] [fast] [overhead_us] [fit_start]
+//                [fast] [overhead_us] [fit_start] [probe]
 //   X is REQUIRED. Example:
 //     ./ClTuneGemm 0 0 ClTuneGemm.cu ClTuneGemmReference.cu \
-//         10000 hybrid 1070 rand - 31742
-//   ("-" in the fast slot means "not fast"; anything other than "fast" works.)
+//         10000 hybrid 1070 - 31742
+//   ("-" in the fast slot means "not fast"; anything other than "fast" works.
+//   "probe" (the final slot) flips on OVERTUNING PROBE mode -- see CHANGES 5.
+//   A numeric final slot is still read as fit_start, default 10.)
 //
 // KNOWN LIMITATIONS (state these in any write-up)
 //   * Output validation is OFF (rapidTest). A configuration that is fast
 //     because it computes the WRONG result would not be rejected.
 //   * Step 1's measured cost includes one-off config-space initialisation and
-//     the matrix upload (~3x a normal step). It seeds the library's running
-//     mean, biasing the early cost estimate upward and hence toward stopping
-//     early; the effect decays as 1/step.
+//     the matrix upload (~3x a normal step). It is pushed at step 2 with
+//     step 2's overhead instead; the CSV keeps the real value.
 //   * The historical cache keys O_hist (hybrid) on the EXACT overhead value.
 //     A measured overhead such as 31742 is not in the default precompute grid,
 //     so hybrid runs MISS the cache and recompute O_hist at init. Add the
@@ -62,6 +70,7 @@
 #include <Ktt.h>
 
 #include "tuner_api.h"
+#include "evaluator.h"
 #include <fstream>
 #include <limits>
 #include <chrono>
@@ -136,8 +145,8 @@ int main(int argc, char** argv)
     {
         std::cerr << "Missing required argument: <X: number of CITuneGemm executions>\n";
         std::cerr << "Usage: " << argv[0] << " [platform] [device] [kernelFile] [referenceKernelFile]"
-                  << " <X> [mode: live|hybrid|hist|ref] [histHW] [searcher: rand|det, default rand]"
-                  << " [fast] [overhead_us] [fit_start, default 10]\n";
+                  << " <X> [mode: live|hybrid|hist|ref] [histHW]"
+                  << " [fast] [overhead_us] [fit_start, default 10] [probe]\n";
         return 1;
     }
     const uint64_t totalRuns = std::stoull(std::string(argv[5]));
@@ -148,48 +157,46 @@ int main(int argc, char** argv)
     }
     const std::string modeStr = (argc >= 7) ? argv[6] : "live";
     const std::string histHW = (argc >= 8) ? argv[7] : "680";
-    // Searcher selection: "rand" (DEFAULT) = RandomSearcher, random order over
-    // the configuration space. It samples WITHOUT replacement: a 5788-step
-    // random reference sweep produced 5737 distinct kernel times, whereas
-    // sampling WITH replacement would give only ~63% distinct (~3660). Note the
-    // offline harness samples WITH replacement (bootstrap), so the two are not
-    // identical -- the effect is small (<1% on the convergence curve) but it is
-    // a real difference, not a match.
-    // "det" = DeterministicSearcher, fixed lexicographic order -- the analysis
-    // instrument for paired-stream comparisons (cross_engine prefix property);
-    // NOT reproducible-session-relevant since rand streams are not reproducible.
-    const bool useRandomSearcher = !(argc >= 9 && std::string(argv[8]) == "det");
-    // "fast" (argv[9]): stop the program right after the tuner's stop
+    // "fast" (argv[8]): stop the program right after the tuner's stop
     // decision -- production runs convey no information about the DECISION
     // (session cost is computable: tuning sum + (X-S)*best), so skipping
     // them turns a ~50-minute experiment into a ~3-minute one. Use for
     // multi-seed testing of the stop decision itself.
-    const bool fastMode = (argc >= 10 && std::string(argv[9]) == "fast");
-    // Overhead (argv[10], us): feeds the HISTORICAL fit at init (history_run's
+    const bool fastMode = (argc >= 9 && std::string(argv[8]) == "fast");
+    // Overhead (argv[9], us): feeds the HISTORICAL fit at init (history_run's
     // oracle scan prices each draw at kernel+overhead). The LIVE cost model is
     // unaffected -- it uses the per-step measured totals from push_result.
     // Default 0 = tuning treated as free in the historical fit, which makes
     // O_hist too deep. Harmless for live mode (no history used), WRONG for
     // hybrid and hist -- see the warning after the mode is resolved.
-    const uint64_t cfgOverhead = (argc >= 11) ? std::stoull(std::string(argv[10])) : 0;
-    // fit_start (argv[11]): warmup steps before the first curve fit. The
+    const uint64_t cfgOverhead = (argc >= 10) ? std::stoull(std::string(argv[9])) : 0;
+    // fit_start (argv[10]): warmup steps before the first curve fit. The
     // library makes NO stop decision before step fit_start + 6, so at high
     // overhead this -- not the fitted curve -- effectively sets the stop.
     // Exposed as an argument so that effect can be measured directly.
-    const uint64_t fitStart = (argc >= 12) ? std::stoull(std::string(argv[11])) : 10;
+    // probe (argv[10], literal word): OVERTUNING PROBE mode -- the tuner
+    // never stops and benchmarks every configuration through the whole X
+    // budget, recording the shadow stop and the fresh raw_est estimate for
+    // offline regret analysis (see CHANGES 5). When the slot holds the word
+    // "probe" instead of a number, fit_start falls back to its default.
+    const bool probeMode = (argc >= 11 && std::string(argv[10]) == "probe");
+    const uint64_t fitStart = (argc >= 11 && !probeMode)
+                                  ? std::stoull(std::string(argv[10]))
+                                  : 10;
     // Matrix dimension is fixed at compile time by useProfiling. It is recorded
     // in the output tag because mixing results from different sizes silently
     // invalidates any comparison (2048^3 and 4096^3 differ ~8x in work).
     constexpr uint32_t kMatSize = useProfiling ? 4096 / 2 : 4096;
     // Output files carry the full input signature, so runs never overwrite:
-    //   tuning_steps_<X>_<mode>_hist<hw>_<searcher>_n<size>_fs<fit_start>
+    //   tuning_steps_<X>_<mode>_hist<hw>_rand_n<size>_fs<fit_start>
     //                [_fast][_oh<overhead>].csv
     std::string tag = std::to_string(totalRuns) + "_" + modeStr + "_hist" + histHW
-                    + "_" + (useRandomSearcher ? "rand" : "det")
+                    + "_rand"
                     + "_n" + std::to_string(kMatSize)
                     + "_fs" + std::to_string(fitStart);
     if (fastMode) tag += "_fast";
     if (cfgOverhead > 0) tag += "_oh" + std::to_string(cfgOverhead);
+    if (probeMode) tag += "_probe";
 
     TunerMode tunerMode = TUNER_MODE_LIVE;
     double k = 1.0;
@@ -215,7 +222,7 @@ int main(int argc, char** argv)
         && cfgOverhead == 0)
     {
         std::cerr << "WARNING: mode '" << modeStr << "' with overhead_us = 0 "
-                  << "(argv[10] not given).\n"
+                  << "(argv[9] not given).\n"
                   << "         The historical fit will treat tuning as free and "
                   << "O_hist will be too deep.\n"
                   << "         Pass the measured per-step overhead, e.g. the "
@@ -224,11 +231,10 @@ int main(int argc, char** argv)
 
     // One line summarising the run, so every log states its own conditions.
     std::cout << "CONFIG: X=" << totalRuns << " mode=" << modeStr
-              << " hist=" << histHW << " searcher="
-              << (useRandomSearcher ? "rand" : "det")
+              << " hist=" << histHW << " searcher=rand"
               << " n=" << kMatSize << " fit_start=" << fitStart
               << " overhead_us=" << cfgOverhead
-              << (fastMode ? " fast" : "") << "\n";
+              << (fastMode ? " fast" : "") << (probeMode ? " probe" : "") << "\n";
 
     uint32_t kSizeM;
     uint32_t kSizeN;
@@ -403,23 +409,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Searcher choice (DEFAULT is rand -- see argv[8] parsing above):
-    //   det -- DeterministicSearcher, FIXED order: a "ref" session
-    //     and a tuning session sample the SAME stream (the tuner session is a
-    //     prefix of the reference), so decline% = T_est/T* - 1 is paired and
-    //     >= 0 by construction. NOTE: lexicographic order is NOT random --
-    //     it front-loads MWG=16 configs -- so paired-stream results carry a
-    //     stream-order bias.
-    //   rand -- RandomSearcher, random order WITHOUT replacement over the
-    //     whole pool. Close to, but not identical with, the work_* harness,
-    //     which samples WITH replacement (see argv[8] note). No stream pairing
-    //     (T* must come from an EXHAUSTIVE ref diary, which bounds every
-    //     possible stream); this is the nearest real-hardware counterpart of
-    //     the harness numbers.
-    if (useRandomSearcher)
-        tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
-    else
-        tuner.SetSearcher(kernel, std::make_unique<ktt::DeterministicSearcher>());
+    // RandomSearcher: random order WITHOUT replacement over the whole space
+    // (the offline harness samples WITH replacement -- a small, known difference).
+    tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
 
     // ---- REFERENCE MODE (mode "ref") --------------------------------------
     // Pure random search for R = X iterations, NO CI tuner. Produces
@@ -462,6 +454,44 @@ int main(int argc, char** argv)
             std::cout << "Reference search done: best kernel " << bestRefUs
                       << " us (config: " << best.GetConfiguration().GetString() << ")\n";
             tuner.SaveResults(refResults, "GemmOutput_" + tag, ktt::OutputFormat::XML);
+
+            // Pool in Jarda's <GPU>-gemm-reduced_output.csv layout (KTT 2.x
+            // has no CSV output). No profiler counters.
+            static const char* kParams[] = {"MWG", "NWG", "KWG", "MDIMC", "NDIMC",
+                "MDIMA", "NDIMB", "KWI", "VWM", "VWN", "STRM", "STRN", "SA", "SB",
+                "PRECISION"};
+            std::ofstream pool("pool_" + tag + "-gemm-reduced_output.csv");
+            pool << "Kernel name,Computation duration (us),Global size,Local size";
+            for (const char* p : kParams)
+                pool << "," << p;
+            pool << ",Maximum work-group size,Local memory size,Private memory size,"
+                    "Constant memory size,Registers count\n";
+            for (const auto& r : refResults)
+            {
+                const ktt::ComputationResult& cr = r.GetResults().front();
+                pool << cr.GetKernelFunction() << "," << cr.GetDuration() / 1000.0 << ","
+                     << cr.GetGlobalSize().GetTotalSize() << ","
+                     << cr.GetLocalSize().GetTotalSize();
+                for (const char* p : kParams)
+                {
+                    std::string value;
+                    for (const auto& pair : r.GetConfiguration().GetPairs())
+                        if (pair.GetName() == p)
+                            value = pair.GetValueString();
+                    pool << "," << value;
+                }
+                if (cr.HasCompilationData())
+                {
+                    const auto& cd = cr.GetCompilationData();
+                    pool << "," << cd.m_MaxWorkGroupSize << "," << cd.m_LocalMemorySize
+                         << "," << cd.m_PrivateMemorySize << "," << cd.m_ConstantMemorySize
+                         << "," << cd.m_RegistersCount;
+                }
+                else
+                    pool << ",,,,,";
+                pool << "\n";
+            }
+            std::cout << "Pool written: pool_" << tag << "-gemm-reduced_output.csv\n";
         }
         release_kernel(handle);   // was leaked: initiate_kernel ran above
         return 0;
@@ -480,14 +510,41 @@ int main(int argc, char** argv)
     double failedWallUs = 0.0;
     const uint64_t failureCap = 1000; // safety against a pathological config space
     bool tuning = true;
+    // Probe mode only: the step where the engine WOULD have stopped (first
+    // remainingBudget == 0), kept for the probe-aware summary. 0 = never.
+    uint64_t shadowStopStep = 0;
     ktt::KernelConfiguration bestConfiguration{};
 
     // Per-step CSV (tuning_steps.csv): step, kernel_us, overhead_us,
     // total_us, new_best, remaining budget -- the real-tuning analog of the
     // work_*/result.txt tables for offline comparison.
     std::ofstream stepLog("tuning_steps_" + tag + ".csv");
-    stepLog << "step,kernel_us,overhead_us,total_us,new_best,budget\n";
+    stepLog << "step,kernel_us,overhead_us,total_us,new_best,budget,raw_est\n";
     double bestKernelUs = std::numeric_limits<double>::infinity();
+
+    // Step 1 is held and pushed at step 2 (see below).
+    bool havePending = false;
+    double pendingKernelUs = 0.0;
+    double pendingWallUs = 0.0;
+
+    // Query the decision ONCE per push and write one row, returning the budget
+    // so the logged value is guaranteed to be the one acted on. raw_est is the
+    // FRESH per-step estimate (tuner_raw_recommendation): it ignores the
+    // library's latched countdown/stop, so after the latch it keeps reporting
+    // what the curve would advise right now. Rows feed the offline comparison
+    // against the validate_total_runtime harness (work_* directories).
+    auto logRow = [&](uint64_t step, double kUs, double ohUs) -> uint64_t
+    {
+        const uint64_t budget = find_number_of_steps_that_should_be_tuning(handle);
+        const uint64_t rawEst = tuner_raw_recommendation(handle);
+        stepLog << step << "," << kUs << "," << ohUs << "," << kUs + ohUs << ","
+                << (kUs < bestKernelUs ? 1 : 0) << "," << budget << "," << rawEst << "\n";
+        if (kUs < bestKernelUs)
+            bestKernelUs = kUs;
+        std::cout << "step " << step << ": kernel " << kUs << " us, overhead "
+                  << ohUs << " us, budget " << budget << "\n";
+        return budget;
+    };
 
     while (runsDone < totalRuns)
     {
@@ -522,39 +579,56 @@ int main(int argc, char** argv)
             // clock); overhead = wall clock minus the kernel's own runtime.
             const double kernelTimeUs = static_cast<double>(result.GetKernelDuration()) / 1000.0;
             const double overheadUs = wallUs - kernelTimeUs;
-            // NOTE: on step 1, wallUs also contains one-off config-space
-            // initialisation and the matrix upload (~3x a normal step). It is
-            // pushed as-is because it IS real session cost, but it seeds the
-            // library's running mean high -- see KNOWN LIMITATIONS in the header.
-            push_result(handle, kernelTimeUs, wallUs);
             ++runsDone;
             ++tuningSteps;
             tuningResults.push_back(result);
 
-            // Per-step log: one row per tuning iteration, for offline
-            // comparison against the validate_total_runtime harness results
-            // (work_* directories) in Python. Cumulative columns mirror the
-            // cost model the library optimizes.
-            // Query the decision ONCE and use it for both the log and control
-            // flow, so the logged budget is guaranteed to be the one acted on.
-            const uint64_t remainingBudget = find_number_of_steps_that_should_be_tuning(handle);
-
-            stepLog << tuningSteps << "," << kernelTimeUs << "," << overheadUs
-                    << "," << kernelTimeUs + overheadUs << ","
-                    << (kernelTimeUs < bestKernelUs ? 1 : 0) << ","
-                    << remainingBudget << "\n";
-            if (kernelTimeUs < bestKernelUs)
-                bestKernelUs = kernelTimeUs;
-            std::cout << "step " << tuningSteps << ": kernel " << kernelTimeUs << " us, overhead "
-                      << overheadUs << " us, budget " << remainingBudget << "\n";
+            // Step 1's overhead includes one-off setup (~3x a normal step), so
+            // it is pushed at step 2 with step 2's overhead instead. The CSV
+            // still logs the real value.
+            if (tuningSteps == 1)
+            {
+                havePending = true;
+                pendingKernelUs = kernelTimeUs;
+                pendingWallUs = wallUs;
+                continue;
+            }
+            if (havePending)
+            {
+                push_result(handle, pendingKernelUs, pendingKernelUs + overheadUs);
+                (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs);
+                havePending = false;
+            }
+            push_result(handle, kernelTimeUs, wallUs);
+            const uint64_t remainingBudget = logRow(tuningSteps, kernelTimeUs, overheadUs);
 
             if (remainingBudget == 0)
             {
-                tuning = false;
-                bestConfiguration = tuner.GetBestConfiguration(kernel);
-                std::cout << "CI tuner stopped tuning after " << tuningSteps << " steps; "
-                          << "spending the remaining " << (totalRuns - runsDone)
-                          << " executions with the best configuration\n";
+                if (probeMode)
+                {
+                    // Overtuning probe: the engine says stop here, but the
+                    // probe deliberately does NOT stop and does NOT latch
+                    // anything itself -- the LIBRARY latches `stopped`, so
+                    // find_number... keeps returning 0 from here on (that 0
+                    // in the budget column IS the shadow-stop marker) while
+                    // raw_est keeps reporting the fresh estimate. push_result
+                    // continues every step (the library still updates
+                    // best_configs/averages after its latch -- needed).
+                    if (shadowStopStep == 0)
+                    {
+                        shadowStopStep = tuningSteps;
+                        std::cout << "shadow stop at step " << tuningSteps
+                                  << " (probe: continuing to tune)\n";
+                    }
+                }
+                else
+                {
+                    tuning = false;
+                    bestConfiguration = tuner.GetBestConfiguration(kernel);
+                    std::cout << "CI tuner stopped tuning after " << tuningSteps << " steps; "
+                              << "spending the remaining " << (totalRuns - runsDone)
+                              << " executions with the best configuration\n";
+                }
             }
         }
         else
@@ -572,10 +646,34 @@ int main(int argc, char** argv)
         }
     }
 
+    // No step 2 happened: push step 1 with its real cost.
+    if (havePending)
+    {
+        push_result(handle, pendingKernelUs, pendingWallUs);
+        (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs);
+        havePending = false;
+    }
+
     if (tuning)
     {
-        // X was exhausted while still tuning (library never said stop).
-        std::cout << "Execution budget spent while still tuning; using best configuration found so far\n";
+        // tuning is only ever still true here in the budget-exhausted path or
+        // in probe mode (where tuning deliberately NEVER turns false).
+        if (probeMode)
+        {
+            if (shadowStopStep > 0)
+                std::cout << "probe complete: shadow stop at step " << shadowStopStep
+                          << "; tuned through all " << totalRuns
+                          << " configurations\n";
+            else
+                std::cout << "probe complete: no shadow stop within " << totalRuns
+                          << " steps; tuned through all " << totalRuns
+                          << " configurations\n";
+        }
+        else
+        {
+            // X was exhausted while still tuning (library never said stop).
+            std::cout << "Execution budget spent while still tuning; using best configuration found so far\n";
+        }
         if (!tuningResults.empty())
         {
             bestConfiguration = tuner.GetBestConfiguration(kernel);
