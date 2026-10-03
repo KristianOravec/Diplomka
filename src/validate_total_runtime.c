@@ -380,7 +380,6 @@ int main(int argc, char **argv) {
 
         /* build the config; historical modes fit their data inside initiate */
         KernelConfig cfg = {0};
-        cfg.struct_size = sizeof(cfg);
         cfg.total_kernel_runs = r->runs;
         cfg.overhead = r->oh;
         cfg.fit_start = fit_start;

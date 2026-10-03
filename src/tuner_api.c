@@ -23,60 +23,8 @@
 /* Max length (including the '\0' terminator) of the optional debug name. */
 #define TUNER_NAME_CAP 128
 
-/* -----------------------------------------------------------------------------
- * DEBUG PRINTS
- *
- * Compile with -DTUNER_DEBUG=1 to turn on tracing; leave it off (the default)
- * and every TUNER_DBG(...) call vanishes at compile time -- zero runtime cost.
- *
- *   gcc ... -DTUNER_DEBUG=1 ...       # traces on
- *   gcc ...                           # traces off (production)
- *
- * Traces go to stderr (so they don't mix into a program's stdout results) and
- * are prefixed with the kernel's debug_name so multiple kernels are
- * distinguishable. They report the per-step budget decision (fresh estimate,
- * new-best resets, countdown, stop), which is what you need to see WHY the
- * estimator stopped where it did -- and, in a harness, to confirm the sampled
- * inputs are actually changing from step to step.
- * ---------------------------------------------------------------------------
- */
 #ifndef TUNER_DEBUG
 #define TUNER_DEBUG 0
-#endif
-
-/* -----------------------------------------------------------------------------
- * RNG SELF-CHECK  (build with -DTUNER_RNG_CHECK=1)
- *
- * Prints ONE summary line per kernel when it stops, proving the samples pushed
- * into the API actually varied. Unlike TUNER_DEBUG this does NOT trace every
- * push, so the output stays short enough to read or screenshot.
- *
- *   gcc ... -DTUNER_RNG_CHECK=1 ...    # one verdict line per kernel
- *   gcc ... -DTUNER_DEBUG=1 ...        # full per-step trace (verbose)
- * --------------------------------------------------------------------------- */
-#ifndef TUNER_RNG_CHECK
-#define TUNER_RNG_CHECK 0
-#endif
-
-/* the input-variation tracking is compiled in for EITHER flag */
-#if TUNER_DEBUG || TUNER_RNG_CHECK
-#define TUNER_TRACK_INPUT 1
-#else
-#define TUNER_TRACK_INPUT 0
-#endif
-
-#if TUNER_RNG_CHECK
-#include <stdio.h>
-#define TUNER_RNG_LOG(name, ...)                                               \
-    do {                                                                       \
-        fprintf(stderr, "[rng-check:%s] ", (name) && *(name) ? (name) : "?");  \
-        fprintf(stderr, __VA_ARGS__);                                          \
-        fprintf(stderr, "\n");                                                 \
-    } while (0)
-#else
-#define TUNER_RNG_LOG(name, ...)                                               \
-    do {                                                                       \
-    } while (0)
 #endif
 
 #if TUNER_DEBUG
@@ -96,24 +44,15 @@
 
 struct KernelHandle {
     char debug_name[TUNER_NAME_CAP];
-
-    /* config */
-    uint64_t
-        total_kernel_runs; /* #E: how many times the chosen config will run */
-    uint64_t overhead;  /* fixed per-step overhead. Superseded for the live cost
-                         * model by the measured total in push_result (two-value
-                         * push); still used for the historical fit at init. */
-    uint64_t fit_start; /* warmup: don't fit the curve before this step */
-    double k;           /* mode selector value (1.0 / 0.0 / in-between) */
-    TunerMode mode;     /* LIVE / HISTORICAL / HYBRID (enum) */
-
-    /* historical inputs resolved at init */
+    uint64_t total_kernel_runs; /* #E */
+    uint64_t overhead;
+    uint64_t fit_start;
+    double k;           /* NEVER READ ANYWHERE C5 */
+    TunerMode mode;
     double hist_a, hist_b;       /* for HISTORICAL (k=0) */
-    uint64_t hist_optimal_steps; /* O_hist for HYBRID */
-
+    uint64_t hist_optimal_steps; /* O_hist for HYBRID, historical optimal steps */
     /* accumulated state */
-    double best_configs[CURVE_LIMIT_MAX]; /* best-so-far KERNEL times (curve fit
-                                             input) */
+    double best_configs[CURVE_LIMIT_MAX]; /* best-so-far KERNEL times (curve fit input) after each step */
     uint64_t best_len;
     double best_config;       /* best KERNEL time so far */
     double avg_runtime;       /* running mean of KERNEL times (curve/legacy) */
@@ -144,12 +83,12 @@ struct KernelHandle {
 };
 
 /* returns the array [0,1,2,...,CURVE_LIMIT_MAX-1] used as the
- * x-values (step numbers) when fitting the curve. Built once, then reused. */
+ * x-values (step numbers) when fitting the curve. */
 static const double *tuner_x_axis(void) {
     static double x[CURVE_LIMIT_MAX];
     static int init = 0;
     if (!init) {
-        for (uint64_t i = 0; i < CURVE_LIMIT_MAX; i++)
+        for (uint16_t i = 0; i < CURVE_LIMIT_MAX; i++)
             x[i] = (double)i;
         init = 1;
     }
@@ -320,13 +259,6 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
         h->best_len = 1;
         h->step = 0;
         h->seeded = 1;
-#if TUNER_TRACK_INPUT
-        /* start the input-variation tracking */
-        h->dbg_min_kernel = h->dbg_max_kernel = kernel_time_us;
-        h->dbg_sum_kernel = kernel_time_us;
-        h->dbg_last_kernel = kernel_time_us;
-        h->dbg_repeat_count = 0;
-#endif
         TUNER_DBG(h->debug_name,
                   "push step=0 (seed) kernel=%.1f total=%.1f budget=%llu",
                   kernel_time_us, total_time_us, (unsigned long long)h->budget);
@@ -334,14 +266,6 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
     }
 
     uint64_t i = h->step + 1;
-#if TUNER_TRACK_INPUT
-    /* accumulate the spread of pushed kernel times */
-    if (kernel_time_us < h->dbg_min_kernel) h->dbg_min_kernel = kernel_time_us;
-    if (kernel_time_us > h->dbg_max_kernel) h->dbg_max_kernel = kernel_time_us;
-    h->dbg_sum_kernel += kernel_time_us;
-    if (kernel_time_us == h->dbg_last_kernel) h->dbg_repeat_count++;
-    h->dbg_last_kernel = kernel_time_us;
-#endif
     TUNER_DBG(h->debug_name, "push step=%llu kernel=%.1f total=%.1f",
               (unsigned long long)i, kernel_time_us, total_time_us);
     /* running means: kernel time (for the curve) and total time (for cost) */
@@ -409,33 +333,6 @@ void push_result(KernelHandle *h, double kernel_time_us, double total_time_us) {
         if (!h->stopped) {
             TUNER_DBG(h->debug_name, "  STOP at step=%llu (budget exhausted)",
                       (unsigned long long)i);
-#if TUNER_TRACK_INPUT
-            /* INPUT-VARIATION VERDICT: did the caller actually feed varied
-             * samples? If min == max the input was constant (stuck RNG or a
-             * mis-wired harness) and any "randomness" in the result is fake. */
-            {
-                double spread = h->dbg_max_kernel - h->dbg_min_kernel;
-                double mean = h->dbg_sum_kernel / (double)(i + 1);
-                const char *verdict =
-                    (spread > 0.0) ? "VARIED (randomness real)"
-                                   : "CONSTANT INPUT -- RNG NOT WORKING";
-                /* under TUNER_DEBUG this joins the trace; under TUNER_RNG_CHECK
-                 * it is the ONLY line printed, one per kernel. */
-                TUNER_DBG(h->debug_name,
-                          "  INPUT CHECK: n=%llu min=%.1f max=%.1f mean=%.1f "
-                          "spread=%.1f consecutive-repeats=%llu -> %s",
-                          (unsigned long long)(i + 1), h->dbg_min_kernel,
-                          h->dbg_max_kernel, mean, spread,
-                          (unsigned long long)h->dbg_repeat_count, verdict);
-                TUNER_RNG_LOG(h->debug_name,
-                              "stop=%llu samples n=%llu min=%.0f max=%.0f "
-                              "mean=%.0f spread=%.0f repeats=%llu -> %s",
-                              (unsigned long long)i,
-                              (unsigned long long)(i + 1), h->dbg_min_kernel,
-                              h->dbg_max_kernel, mean, spread,
-                              (unsigned long long)h->dbg_repeat_count, verdict);
-            }
-#endif
         }
         h->stopped = 1;
     }

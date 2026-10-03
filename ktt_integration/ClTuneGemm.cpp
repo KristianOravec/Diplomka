@@ -386,7 +386,6 @@ int main(int argc, char** argv)
     // worth performing (0 = stop). The remaining X budget is spent running
     // the GEMM with the best configuration found.
     KernelConfig cfg = {};
-    cfg.struct_size = sizeof(KernelConfig);
     cfg.total_kernel_runs = totalRuns; // X
     cfg.overhead = cfgOverhead;        // feeds the HISTORICAL fit; live cost model
                                        // uses per-step measured totals (push_result)

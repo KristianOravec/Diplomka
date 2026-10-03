@@ -71,10 +71,7 @@ typedef enum {
 } TunerMode;
 
 /* Configuration passed to initiate_kernel.
- * struct_size MUST be set to sizeof(KernelConfig) for ABI safety. */
 typedef struct {
-    uint64_t struct_size;
-
     /* core estimator inputs */
     uint64_t total_kernel_runs;  /* X / #E; may be 0 here and set later */
     uint64_t overhead;           /* per-step tuning overhead */

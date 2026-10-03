@@ -151,7 +151,6 @@ int main(int argc, char** argv) {
 
         /* Build the config; historical modes read/fit data inside initiate_kernel. */
         KernelConfig cfg = {0};
-        cfg.struct_size = sizeof(cfg);
         cfg.total_kernel_runs = r->runs;
         cfg.overhead = r->oh;
         cfg.fit_start = fit_start;
