@@ -1,73 +1,51 @@
 /* =============================================================================
- * historical_cache.c -- load PRECOMPUTED historical parameters from disk
- *                       instead of recomputing them at every initiate_kernel().
+ * historical_cache.c -- lookup of precomputed historical parameters
  *
- * THE PROBLEM THIS SOLVES
- *   The historical inputs for k=0 and 0<k<1 depend only on the historical data
- *   and a few config values -- never on the live tuning run. Yet
- *   initiate_kernel() recomputed them every single time:
- *     k=0   : get_regression_params() -- averages `number_of_tests` simulated
- *             runs, then fits a curve.
- *     0<k<1 : history_run() -- simulates `number_of_tests` COMPLETE tuning
- *             sessions to find the average oracle stop.
-   With number_of_tests = 1000 that is seconds to minutes PER KERNEL, and the
-   answer is identical every time (each Monte-Carlo trial is seeded from its
-   own test index + salt, so the result is a pure function of the inputs).
-   In a deployed tuner that stall is unacceptable.
+ * Reads historical_params.csv (written by precompute_historical.py) on first
+ * lookup. Path: $TUNER_HISTORICAL_PARAMS if set, else ./historical_params.csv.
+ * A miss (no file, no matching row) returns false; the caller then computes.
  *
- *   So precompute_historical.py computes them once, offline, and writes
- *   historical_params.csv. This module loads that table and answers lookups in
- *   O(n) over a handful of rows.
- *
- * TWO KEYS, NOT ONE
- *   The two quantities depend on DIFFERENT parameters, so they cannot share a
- *   cache key:
- *     REG (a, b)    : hist_hw, file_name, total_kernel_runs, fit_start, tests
- *                     -- overhead is irrelevant to the curve fit.
- *     OPT (O_hist)  : hist_hw, file_name, total_kernel_runs, overhead, tests
- *                     -- fit_start is irrelevant to the oracle scan.
- *
- * FALLBACK
- *   A miss (no file, or no matching row) returns 0 and the caller computes as
- *   before. A missing cache therefore costs performance, never correctness.
- *
- * FILE LOCATION
- *   $TUNER_HISTORICAL_PARAMS if set, else ./historical_params.csv
+ * Row kinds and their keys:
+ *   REG (a, b)   : hist_hw, file_name, total_kernel_runs, fit_start, tests
+ *   OPT (O_hist) : hist_hw, file_name, total_kernel_runs, overhead,  tests
  * ============================================================================= */
 
 #include "historical_cache.h"
+#include "evaluator.h" /* CURVE_LIMIT_MAX */
+#include <inttypes.h>
 #include <stdio.h>
-#include "evaluator.h"
 #include <stdlib.h>
 #include <string.h>
 
-#define HC_MAX_ROWS 512
-#define HC_STR_CAP 128
+#define HIST_CACHE_MAX_ROWS 512
+#define HIST_CACHE_STR_CAP 128
+
+/* -1 in the CSV: column not used by this row kind */
+#define HIST_CACHE_NA (-1L)
+/* -1 in total_kernel_runs (read as UINT64_MAX): REG row valid for any
+ * runs >= CURVE_LIMIT_MAX */
+#define HIST_CACHE_ANY_RUNS UINT64_MAX
 
 typedef struct {
     char kind[4]; /* "REG" or "OPT" */
     char hist_hw[16];
-    char file_name[HC_STR_CAP];
-    uint64_t total_kernel_runs;
-    long fit_start; /* -1 when not applicable */
-    long overhead;  /* -1 when not applicable */
+    char file_name[HIST_CACHE_STR_CAP];
+    uint64_t total_kernel_runs; /* or HIST_CACHE_ANY_RUNS */
+    long fit_start;             /* or HIST_CACHE_NA */
+    long overhead;              /* or HIST_CACHE_NA */
     uint64_t number_of_tests;
     double a, b;
-    long optimal_steps; /* -1 when not applicable */
-} HcRow;
+    long optimal_steps; /* or HIST_CACHE_NA */
+} HistCacheRow;
 
-static HcRow hc_rows[HC_MAX_ROWS];
-static int hc_count = 0;
-static int hc_loaded = 0; /* 0 = not tried yet, 1 = tried (success or not) */
+static HistCacheRow hist_cache_rows[HIST_CACHE_MAX_ROWS];
+static int hist_cache_count = 0;
+static bool hist_cache_tried = false;
 
-/* -----------------------------------------------------------------------------
- * hc_load -- read the CSV on first use. Called lazily so a program that never
- * uses historical modes pays nothing.
- * --------------------------------------------------------------------------- */
-static void hc_load(void) {
-    if (hc_loaded)
+static void hist_cache_load(void) {
+    if (hist_cache_tried)
         return;
-    hc_loaded = 1; /* set first: a failed load must not be retried per lookup */
+    hist_cache_tried = true;
 
     const char *path = getenv("TUNER_HISTORICAL_PARAMS");
     if (!path || !*path)
@@ -75,116 +53,99 @@ static void hc_load(void) {
 
     FILE *fp = fopen(path, "r");
     if (!fp)
-        return; /* no cache -> every lookup misses -> caller computes */
+        return;
 
     char line[1024];
-    if (!fgets(line, sizeof(line), fp)) { /* skip the header */
+    if (!fgets(line, sizeof(line), fp)) { /* header */
         fclose(fp);
         return;
     }
 
-    while (fgets(line, sizeof(line), fp) && hc_count < HC_MAX_ROWS) {
-        HcRow r;
-        memset(&r, 0, sizeof(r));
-        char kind[32] = "", hw[64] = "", fname[HC_STR_CAP] = "";
-        unsigned long long runs = 0, tests = 0;
-        long fs = -1, oh = -1, opt = -1;
-        double a = -1, b = -1;
+    while (hist_cache_count < HIST_CACHE_MAX_ROWS &&
+           fgets(line, sizeof(line), fp)) {
+        HistCacheRow row = {0};
 
         /* kind,hist_hw,file_name,total_kernel_runs,fit_start,overhead,
-         * number_of_tests,a,b,optimal_steps */
-        int n = sscanf(line, "%31[^,],%63[^,],%127[^,],%llu,%ld,%ld,%llu,%lf,%lf,%ld",
-                       kind, hw, fname, &runs, &fs, &oh, &tests, &a, &b, &opt);
+         * number_of_tests,a,b,optimal_steps   ("-1" in an unsigned column
+         * wraps to the max value, the "any runs" marker) */
+        int n = sscanf(line,
+                       "%3[^,],%15[^,],%127[^,],%" SCNu64 ",%ld,%ld,%" SCNu64
+                       ",%lf,%lf,%ld",
+                       row.kind, row.hist_hw, row.file_name,
+                       &row.total_kernel_runs, &row.fit_start, &row.overhead,
+                       &row.number_of_tests, &row.a, &row.b,
+                       &row.optimal_steps);
         if (n < 10)
-            continue; /* malformed row: ignore rather than abort */
+            continue; /* malformed or over-long field: skip the row */
 
-        snprintf(r.kind, sizeof(r.kind), "%s", kind);
-        snprintf(r.hist_hw, sizeof(r.hist_hw), "%s", hw);
-        snprintf(r.file_name, sizeof(r.file_name), "%s", fname);
-        r.total_kernel_runs = (uint64_t)runs;
-        r.fit_start = fs;
-        r.overhead = oh;
-        r.number_of_tests = (uint64_t)tests;
-        r.a = a;
-        r.b = b;
-        r.optimal_steps = opt;
-        hc_rows[hc_count++] = r;
+        hist_cache_rows[hist_cache_count++] = row;
     }
     fclose(fp);
 }
 
-/* shared key fields; the caller checks the discriminating one */
-static int hc_base_match(const HcRow *r, const char *kind, const char *hist_hw,
-                         const char *file_name, uint64_t total_kernel_runs,
-                         uint64_t number_of_tests) {
-    return strcmp(r->kind, kind) == 0 &&
-           strcmp(r->hist_hw, hist_hw ? hist_hw : "") == 0 &&
-           strcmp(r->file_name, file_name ? file_name : "") == 0 &&
-           r->total_kernel_runs == total_kernel_runs &&
-           r->number_of_tests == number_of_tests;
+/* Key fields shared by REG and OPT rows. total_kernel_runs is checked by each
+ * lookup itself, because REG and OPT match it differently. */
+static bool hist_cache_base_match(const HistCacheRow *row, const char *kind,
+                                  const char *hist_hw, const char *file_name,
+                                  uint64_t number_of_tests) {
+    return strcmp(row->kind, kind) == 0 &&
+           strcmp(row->hist_hw, hist_hw ? hist_hw : "") == 0 &&
+           strcmp(row->file_name, file_name ? file_name : "") == 0 &&
+           row->number_of_tests == number_of_tests;
 }
 
-int historical_cache_lookup_regression(const char *hist_hw,
-                                       const char *file_name,
-                                       uint64_t total_kernel_runs,
-                                       uint64_t fit_start,
-                                       uint64_t number_of_tests, double *out_a,
-                                       double *out_b) {
-    hc_load();
-    for (int i = 0; i < hc_count; i++) {
-        HcRow *r = &hc_rows[i];
-        if (strcmp(r->kind, "REG") != 0)
-            continue;
-        if (strcmp(r->hist_hw, hist_hw ? hist_hw : "") != 0)
-            continue;
-        if (strcmp(r->file_name, file_name ? file_name : "") != 0)
-            continue;
-        if (r->number_of_tests != number_of_tests)
-            continue;
-        if (r->fit_start != (long)fit_start)
+bool hist_cache_lookup_regression(const char *hist_hw, const char *file_name,
+                                  uint64_t total_kernel_runs,
+                                  uint64_t fit_start, uint64_t number_of_tests,
+                                  double *out_a, double *out_b) {
+    hist_cache_load();
+    for (int i = 0; i < hist_cache_count; i++) {
+        const HistCacheRow *row = &hist_cache_rows[i];
+        if (!hist_cache_base_match(row, "REG", hist_hw, file_name, number_of_tests) ||
+            row->fit_start != (long)fit_start)
             continue;
 
-        /* total_kernel_runs is NOT part of the REG key. The fit uses
-         * curve_limit = min(runs, pool size, CURVE_LIMIT_MAX), so every
-         * runs >= CURVE_LIMIT_MAX produces the same a,b. A row stored with
-         * total_kernel_runs = -1 is the canonical "any large runs" entry and
-         * matches any such request; rows with a concrete value still require
-         * an exact match, because runs < CURVE_LIMIT_MAX genuinely changes
-         * the result. */
-        int matches = (r->total_kernel_runs == (uint64_t)-1)
-                          ? (total_kernel_runs >= CURVE_LIMIT_MAX)
-                          : (r->total_kernel_runs == total_kernel_runs);
-        if (!matches)
+        /* The fit uses at most CURVE_LIMIT_MAX steps, so every
+         * runs >= CURVE_LIMIT_MAX gives the same a, b.
+         * REG(a,b) needs to fit an average curve, and the fit never uses more than 2000 steps.
+         * Beyond 2000 steps `total_kernel_runs` has no effect on a, b */
+        bool  total_kernel_runs_match;
+        if (row->total_kernel_runs == HIST_CACHE_ANY_RUNS)
+            total_kernel_runs_match = (total_kernel_runs >= CURVE_LIMIT_MAX);
+        else
+            total_kernel_runs_match = (row->total_kernel_runs == total_kernel_runs);
+        if (!total_kernel_runs_match)
             continue;
 
-        if (out_a) *out_a = r->a;
-        if (out_b) *out_b = r->b;
-        return 1;
+        if (out_a)
+            *out_a = row->a;
+        if (out_b)
+            *out_b = row->b;
+        return true;
     }
-    return 0; /* miss -> caller must compute */
+    return false;
 }
 
-int historical_cache_lookup_optimum(const char *hist_hw, const char *file_name,
-                                    uint64_t total_kernel_runs,
-                                    uint64_t overhead,
-                                    uint64_t number_of_tests,
-                                    uint64_t *out_optimal_steps) {
-    hc_load();
-    for (int i = 0; i < hc_count; i++) {
-        HcRow *r = &hc_rows[i];
-        /* overhead discriminates OPT rows; fit_start is not part of the key */
-        if (hc_base_match(r, "OPT", hist_hw, file_name, total_kernel_runs,
-                          number_of_tests) &&
-            r->overhead == (long)overhead) {
-            if (out_optimal_steps && r->optimal_steps >= 0)
-                *out_optimal_steps = (uint64_t)r->optimal_steps;
-            return 1;
-        }
+bool hist_cache_lookup_optimum(const char *hist_hw, const char *file_name,
+                               uint64_t total_kernel_runs, uint64_t overhead,
+                               uint64_t number_of_tests,
+                               uint64_t *out_optimal_steps) {
+    hist_cache_load();
+    for (int i = 0; i < hist_cache_count; i++) {
+        const HistCacheRow *row = &hist_cache_rows[i];
+        if (!hist_cache_base_match(row, "OPT", hist_hw, file_name, number_of_tests) ||
+            row->total_kernel_runs != total_kernel_runs ||
+            row->overhead != (long)overhead)
+            continue;
+
+        if (out_optimal_steps && row->optimal_steps != HIST_CACHE_NA)
+            *out_optimal_steps = (uint64_t)row->optimal_steps;
+        return true;
     }
-    return 0;
+    return false;
 }
 
-int historical_cache_row_count(void) {
-    hc_load();
-    return hc_count;
+int hist_cache_row_count(void) {
+    hist_cache_load();
+    return hist_cache_count;
 }
