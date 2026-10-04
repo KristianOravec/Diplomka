@@ -44,43 +44,31 @@
 
 struct KernelHandle {
     char debug_name[TUNER_NAME_CAP];
-    uint64_t total_kernel_runs; /* #E */
+
+    /* config */
+    uint64_t total_kernel_runs;  /* X */
     uint64_t overhead;
     uint64_t fit_start;
-    double k;           /* NEVER READ ANYWHERE C5 */
+    double k;                    /* unused (C5) */
     TunerMode mode;
-    double hist_a, hist_b;       /* for HISTORICAL (k=0) */
-    uint64_t hist_optimal_steps; /* O_hist for HYBRID, historical optimal steps */
-    /* accumulated state */
-    double best_configs[CURVE_LIMIT_MAX]; /* best-so-far KERNEL times (curve fit input) after each step */
+    double hist_a, hist_b;       /* hist mode: frozen curve a, b */
+    uint64_t hist_optimal_steps; /* hybrid mode: O_hist */
+
+    /* state */
+    double best_configs[CURVE_LIMIT_MAX]; /* best-so-far kernel time per step (fit input) */
     uint64_t best_len;
-    double best_config;       /* best KERNEL time so far */
-    double avg_runtime;       /* running mean of KERNEL times (curve/legacy) */
-    double avg_total_runtime; /* running mean of TOTAL times (kernel+overhead)
-                                 -> cost model */
-    uint64_t step;            /* index of last sample (0-based) */
-    int seeded;
+    double best_config;          /* best kernel time so far */
+    double avg_runtime;          /* mean kernel time, unused (C8) */
+    double avg_total_runtime;    /* mean total time = step cost */
+    uint64_t step;               /* index of the last push (0-based) */
+    int seeded;                  /* first push received */
 
-    /* budget countdown -- mirrors the batch estimator's running `budget`.
-     * Starts at max_steps, decrements each step, is reset to the fresh estimate
-     * when a new best is found (or shrunk if the estimate is smaller), and the
-     * kernel signals STOP once budget < 1. This is Python's
-     * commit-and-countdown stopping rule, which the earlier raw-budget poll did
-     * NOT implement. */
+    /* stop rule: counts down each step, reset on a new best, shrunk when the
+     * estimate is smaller; STOP once it reaches 0 */
     uint64_t budget;
-    int stopped; /* latched once budget < 1 */
-
-    /* ---- input-variation tracking (debug builds only) ----
-     * Records the spread of the kernel times actually pushed, so a debug run
-     * can PROVE the caller is feeding varied samples rather than a constant.
-     * A stuck RNG or a mis-wired harness shows up here as min == max and
-     * repeat_count == step. Zero cost when TUNER_DEBUG is off (the fields are
-     * only written inside TUNER_DEBUG guards). */
-    double dbg_min_kernel, dbg_max_kernel; /* range of pushed kernel times */
-    double dbg_sum_kernel;                 /* for the mean */
-    double dbg_last_kernel;                /* previous sample, to spot repeats */
-    uint64_t dbg_repeat_count;             /* consecutive identical samples */
+    int stopped;                 /* latched once budget < 1 */
 };
+
 
 /* returns the array [0,1,2,...,CURVE_LIMIT_MAX-1] used as the
  * x-values (step numbers) when fitting the curve. */
@@ -95,13 +83,9 @@ static const double *tuner_x_axis(void) {
     return x;
 }
 
-/* One per-step decision: fit the curve to the best-so-far history, find the
- * cost-minimising extra budget, and return it -- or 0 if the curve predicts no
- * further improvement.
- *
- *   step_cost = the measured per-step cost (total runtime, overhead already
- *               included). Passed straight to the tuner minimiser, which takes
- *               no separate overhead argument. */
+/* Fresh estimate: fit the curve, minimise T(x), return the extra steps
+ * (0 if the curve predicts no improvement). step_cost already includes
+ * the overhead. */
 static uint64_t tuner_local_budget(uint64_t current, uint64_t total,
                                    double step_cost, double *best_cfg,
                                    uint64_t best_len, uint64_t fit_start,
@@ -183,14 +167,6 @@ KernelHandle *initiate_kernel(const KernelConfig *cfg, const char *debug_name,
         handle->debug_name[0] = '\0';
     }
 
-    /* Resolve historical data for the non-LIVE modes -- done ONCE here, the
-     * same way evaluator_run does it. */
-    /* PRECOMPUTED FIRST: these historical values depend only on the historical
-     * data and a few config fields -- never on the live run -- so they are
-     * computed once offline by precompute_historical.py and looked up here.
-     * Recomputing them per kernel cost seconds to minutes and returned the same
-     * answer every time. On a cache miss we fall back to computing, so a
-     * missing table costs speed but never correctness. */
     if (cfg->mode == TUNER_MODE_HISTORICAL) {
         /* k == 0: frozen curve parameters a, b. */
         double cache_a = 0, cache_b = 0;
@@ -338,21 +314,14 @@ void push_result(KernelHandle *handle, double kernel_time_us, double total_time_
     }
 }
 
-/* ---- query (stateless per-call) ---- */
-
 uint64_t find_number_of_steps_that_should_be_tuning(KernelHandle *handle) {
     if (!handle || !handle->seeded)
         return 1; /* not started: keep tuning */
-    /* The stop decision is now maintained incrementally in push_result, using
-     * Python's commit-and-countdown rule. Here we simply report it:
-     *   0  = budget exhausted -> STOP
-     *   >0 = remaining committed budget -> keep tuning */
     if (handle->stopped)
         return 0;
     return handle->budget;
 }
 
-/* ---- introspection ---- */
 uint64_t tuner_steps_taken(const KernelHandle *handle) {
     return handle ? (handle->seeded ? handle->step + 1 : 0) : 0;
 }
