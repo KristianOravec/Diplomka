@@ -70,7 +70,6 @@ typedef enum {
     TUNER_MODE_HYBRID = 2
 } TunerMode;
 
-/* Configuration passed to initiate_kernel.
 typedef struct {
     /* core estimator inputs */
     uint64_t total_kernel_runs;  /* X / #E; may be 0 here and set later */
