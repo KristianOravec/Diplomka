@@ -73,3 +73,5 @@ low_power_era/
 
 # LibreOffice lock files
 .~lock.*
+test_cache_offline_*/
+work*
