@@ -21,7 +21,8 @@ from multiprocessing import Pool
 
 # Ryzen 7 5800HS: 8 physical cores. Use 8, not 16 -- SMT gives little on tight
 # numeric loops and can hurt via cache contention.
-WORKERS = 8
+# FIX for i7 14650hx
+WORKERS = 16
 
 DATA_PATH = "../raw-data/raw-autotuning-data/"
 
@@ -73,13 +74,13 @@ def experiment(file_name):
     #file_name_list = ["1070-gemm-16-4096-4096_output.csv", "1070-gemm-128-128-128_output.csv", "1070-gemm-4096-16-4096_output.csv", "1070-gemm-4096-4096-16_output.csv", "1070-gemm-reduced_output.csv"]
 
     hist_HW = "GPU-1070" # the HW used to set the estimate
-    hw_list = ["GPU-750", "GPU-1070", "GPU-2080", "GPU-Vega56"]
+    hw_list = ["GPU-750", "GPU-1070", "GPU-2080"]
     #file_name_list = ["gemm_batch_output.csv","gemm_output.csv","conv_output.csv","reduction_output.csv"]
 
-    kernel_run_number_list = ["10000","1000000"]
+    kernel_run_number_list = ["10000","10000000"]
 
     k_values = ["1.0","0.0","0.5"]
-    overhead_values = ["100000","1000000"]
+    overhead_values = ["10000","1000000"]
     hw_kernel_combinations = []
 
     fit_start = 10
