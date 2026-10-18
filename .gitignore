@@ -75,3 +75,4 @@ low_power_era/
 .~lock.*
 test_cache_offline_*/
 work*
+venv/
