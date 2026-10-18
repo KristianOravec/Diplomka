@@ -72,25 +72,45 @@ cd ~/Diplomka
 ### 4.1 Real-hardware tuning sessions (the deployed path)
 
 ```bash
-# <X> is required = total GEMM executions (tuning steps + production runs)
-./ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu \
-    ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu <X> <mode> [histHW] [searcher] [fast] [overhead_us]
-
-# modes:  live (k=1, no history) | hybrid (k=0.5, blend with history) | hist (k=0, frozen curve)
-# histHW: which GPU's dataset teaches the estimator (default 680); ignored by live
-# searcher: rand (random, deployment-style) [default rand] | det (fixed order, paired-stream; pass explicitly)
-# fast: stop right after the tuning decision -- skips production runs (~50 min -> ~3 min)
-# overhead_us: per-step cost fed to the HISTORICAL fit at init (default 0 = free steps)
-#              set it to your measured overhead (see tuning_steps.csv) for realistic O_hist!
-
-# Examples:
-./ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu \
-    ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 1070 rand "" 16600
-./ClTuneGemm ... 500 ref                                # oracle diary (no tuner, N configs)
+K=~/KTT/Examples/ClTuneGemm
+./ClTuneGemm 0 0 $K/ClTuneGemm.cu $K/ClTuneGemmReference.cu \
+    <X> [mode] [histHW] [fast] [overhead_us] [fit_start]
 ```
 
-Outputs (auto-named with the full input signature, never overwrite each other):
-`tuning_steps_<X>_<mode>_hist<hw>_<searcher>[_oh<oh>][_fast].csv`, `GemmOutput_<...>.xml`.
+| argument | meaning | default |
+|---|---|---|
+| `X` | total GEMM executions (tuning steps + production runs), required | – |
+| `mode` | `live` (no history), `hybrid` (blend with O_hist), `hist` (frozen a, b), `ref` (random search for X steps, no library) | `live` |
+| `histHW` | GPU whose dataset provides the history; in `ref` mode the name of the measured GPU (required); ignored by `live` | `680` |
+| `fast` | stop right after the tuning decision; production cost is computed from the CSV. Any other value (e.g. `-`) = not fast | not fast |
+| `overhead_us` | per-step overhead for the historical values (O_hist, a, b); use the measured median | `0` |
+| `fit_start` | warmup steps before the first curve fit | `10` |
 
-**Rule**: `pgrep -af ClTuneGemm` must be empty before launching; two GPU runs at
-once produce garbage timings.
+The searcher is always random (no repeats). Output: `tuning_steps_<tag>.csv` in the current folder.
+
+Run with the CUDA JIT cache disabled, so every step has a constant compile cost:
+```bash
+export CUDA_CACHE_DISABLE=1
+```
+
+Examples:
+```bash
+
+
+# one hybrid session, as in the experiments (RTX 5050, overhead 68.2 ms)
+~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu  ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 5050 fast 68220
+
+# reference sweep over the whole space (5788 configs)
+~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 5788 ref 5050
+# many sessions overnight (modes interleaved, resumable)
+./run_sessions.sh 1000 ~/sessions_1000
+```
+Outputs (named after the arguments, written to the current folder):
+
+- tuning runs: `tuning_steps_<X>_<mode>_hist<hw>_rand_n4096_fs<fit_start>[_fast][_oh<overhead>].csv`
+               and `GemmOutput_<tag>.xml` (KTT's own results)
+- ref mode:    `<gpu>-gemm-reduced_output.csv` (pool in Jarda's format),
+               `<gpu>-reference_steps.csv` (step log with overhead), `<gpu>-GemmOutput.xml`
+
+Runs with the same arguments in the same folder overwrite each other,
+so use one folder per session (as `run_sessions.sh` does).
