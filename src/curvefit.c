@@ -11,6 +11,8 @@
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
 #include <gsl/gsl_multifit.h>
+#include <gsl/gsl_errno.h>
+#include <gsl/gsl_multifit_nlinear.h>
 #include <lbfgs.h>
 #include <math.h>
 
@@ -27,23 +29,84 @@ static double fitting_function(double x, double a, double b, double c) {
     return b / pow(x, a) + c;
 }
 
-static inline void apply_curve_parameter_bounds(gsl_vector *co) {
-    double decay = gsl_vector_get(co, 0);
+/* Trust-region fit helpers. GSL has no bounds, so the decay a is fitted
+ * through t with a = MIN + (MAX - MIN) * sigmoid(t): a can never leave
+ * [CURVEFIT_MIN_DECAY_RATE, CURVEFIT_MAX_DECAY_RATE], like Python's bounds. */
+typedef struct {
+    const double *x, *y;
+    size_t n;
+} FitData;
 
-    if (decay < CURVEFIT_MIN_DECAY_RATE) {
-        decay = CURVEFIT_MIN_DECAY_RATE;
-    } else if (decay > CURVEFIT_MAX_DECAY_RATE) {
-        decay = CURVEFIT_MAX_DECAY_RATE;
+static inline double a_from_t(double t) {
+    return CURVEFIT_MIN_DECAY_RATE +
+           (CURVEFIT_MAX_DECAY_RATE - CURVEFIT_MIN_DECAY_RATE) / (1.0 + exp(-t));
+}
+
+static inline double t_from_a(double a) {
+    double lo = CURVEFIT_MIN_DECAY_RATE, hi = CURVEFIT_MAX_DECAY_RATE;
+    double eps = 1e-9 * (hi - lo);
+    if (a < lo + eps) a = lo + eps;
+    if (a > hi - eps) a = hi - eps;
+    return log((a - lo) / (hi - a));
+}
+
+/* residuals r_i = f(x_i) - y_i */
+static int fit_residuals(const gsl_vector *p, void *data, gsl_vector *r) {
+    const FitData *d = (const FitData *)data;
+    double a = a_from_t(gsl_vector_get(p, 0));
+    double b = gsl_vector_get(p, 1), c = gsl_vector_get(p, 2);
+    for (size_t i = 0; i < d->n; i++)
+        gsl_vector_set(r, i, fitting_function(d->x[i], a, b, c) - d->y[i]);
+    return GSL_SUCCESS;
+}
+
+/* Jacobian w.r.t. (t, b, c): d/da = -b * x^-a * ln x, chained with da/dt */
+static int fit_jacobian(const gsl_vector *p, void *data, gsl_matrix *J) {
+    const FitData *d = (const FitData *)data;
+    double t = gsl_vector_get(p, 0), b = gsl_vector_get(p, 1);
+    double a = a_from_t(t);
+    double s = 1.0 / (1.0 + exp(-t));
+    double da_dt = (CURVEFIT_MAX_DECAY_RATE - CURVEFIT_MIN_DECAY_RATE) * s * (1.0 - s);
+    for (size_t i = 0; i < d->n; i++) {
+        double inv_x_pow_a = 1.0 / pow(d->x[i], a);
+        gsl_matrix_set(J, i, 0, -b * inv_x_pow_a * log(d->x[i]) * da_dt);
+        gsl_matrix_set(J, i, 1, inv_x_pow_a);
+        gsl_matrix_set(J, i, 2, 1.0);
     }
-    gsl_vector_set(co, 0, decay);
+    return GSL_SUCCESS;
+}
 
-    if (gsl_vector_get(co, 1) < CURVEFIT_MIN_SCALE_FACTOR) {
-        gsl_vector_set(co, 1, CURVEFIT_MIN_SCALE_FACTOR);
+/* Starting point: for a fixed a the model is linear in b and c, so scan 30
+ * values of a, solve b, c by ordinary least squares, keep the best triple.
+ * Starting from b = 1 instead can strand the solver in a poor valley. */
+static void initial_guess(const double *x, const double *y, size_t n, double *a,
+                          double *b, double *c) {
+    double best = INFINITY;
+    for (int g = 0; g < 30; g++) {
+        double ag = CURVEFIT_MIN_DECAY_RATE +
+                    (CURVEFIT_MAX_DECAY_RATE - CURVEFIT_MIN_DECAY_RATE) * (g + 0.5) / 30;
+        double su = 0, sy = 0, suu = 0, suy = 0;
+        for (size_t i = 0; i < n; i++) {
+            double u = pow(x[i], -ag);
+            su += u; sy += y[i]; suu += u * u; suy += u * y[i];
+        }
+        double mu = su / n, my = sy / n, var = suu / n - mu * mu;
+        if (!(var > 0))
+            continue;
+        double bg = (suy / n - mu * my) / var, cg = my - bg * mu, sse = 0;
+        for (size_t i = 0; i < n; i++) {
+            double r = fitting_function(x[i], ag, bg, cg) - y[i];
+            sse += r * r;
+        }
+        if (sse < best) { best = sse; *a = ag; *b = bg; *c = cg; }
     }
 }
 
 /*
-    Fits a,b,c so f(x[i]) ~ y[i] for all i, by iterative least squares.
+    Fits a,b,c so f(x[i]) ~ y[i] for all i, by trust-region least squares
+    (GSL gsl_multifit_nlinear, Levenberg-Marquardt). Like scipy's curve_fit,
+    a step is only accepted if it lowers the error, and the fit stops on
+    convergence.
     [in]     x : array of x-values (step numbers), length n
     [in]     y : array of y-values (measured best-so-far runtimes), length n.
     [in]     n : number of points.
@@ -55,56 +118,42 @@ static inline void apply_curve_parameter_bounds(gsl_vector *co) {
 */
 static void curve_fit_lm(double *x, double *y, uint64_t n, double *a, double *b,
                          double *c) {
-    gsl_matrix *J = gsl_matrix_alloc(n, 3);
-    gsl_matrix *JtJ = gsl_matrix_alloc(3, 3);
-    gsl_vector *yv = gsl_vector_alloc(n);
-    gsl_vector *Jty = gsl_vector_alloc(3);
+    if (n < 3)
+        return;
+    gsl_error_handler_t *old_handler = gsl_set_error_handler_off();
+
+    FitData data = {x, y, (size_t)n};
+    gsl_multifit_nlinear_fdf fdf = {.f = fit_residuals, .df = fit_jacobian,
+                                    .fvv = NULL, .n = (size_t)n, .p = 3,
+                                    .params = &data};
+    gsl_multifit_nlinear_parameters params =
+        gsl_multifit_nlinear_default_parameters();
+    gsl_multifit_nlinear_workspace *w = gsl_multifit_nlinear_alloc(
+        gsl_multifit_nlinear_trust, &params, (size_t)n, 3);
     gsl_vector *co = gsl_vector_alloc(3);
-    gsl_vector *delta = gsl_vector_alloc(3);
-    gsl_permutation *p = gsl_permutation_alloc(3);
-    gsl_vector_set(co, 0, *a);
+
+    initial_guess(x, y, (size_t)n, a, b, c);
+    gsl_vector_set(co, 0, t_from_a(*a));
     gsl_vector_set(co, 1, *b);
     gsl_vector_set(co, 2, *c);
-    for (uint64_t iter = 0; iter < CURVEFIT_LM_ITERATIONS; iter++) {
-        double ai = gsl_vector_get(co, 0);
-        double bi = gsl_vector_get(co, 1);
-        double ci = gsl_vector_get(co, 2);
-        for (uint64_t i = 0; i < n; i++) {
-            double xi = x[i];
-            double x_pow_a = pow(xi, ai);
-            double inv_x_pow_a = 1.0 / x_pow_a;
-            double log_x = log(xi);
-            gsl_matrix_set(J, i, 0, -bi * inv_x_pow_a * log_x);
-            gsl_matrix_set(J, i, 1, inv_x_pow_a);
-            gsl_matrix_set(J, i, 2, 1.0);
-            gsl_vector_set(yv, i, y[i] - (bi * inv_x_pow_a + ci));
-        }
-        double lambda = CURVEFIT_LM_DAMPING;
-        gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, J, J, 0.0, JtJ);
-        for (int i = 0; i < 3; i++)
-            gsl_matrix_set(JtJ, i, i,
-                           gsl_matrix_get(JtJ, i, i) * (1.0 + lambda) + lambda);
-        gsl_blas_dgemv(CblasTrans, 1.0, J, yv, 0.0, Jty);
-        int signum;
-        if (gsl_linalg_LU_decomp(JtJ, p, &signum) == 0 &&
-            fabs(gsl_linalg_LU_det(JtJ, signum)) > CURVEFIT_MATRIX_DETECTION) {
-            gsl_linalg_LU_solve(JtJ, p, Jty, delta);
-            gsl_vector_add(co, delta);
-            apply_curve_parameter_bounds(co);
-        }
+    gsl_multifit_nlinear_init(co, &fdf, w);
+
+    int info;
+    gsl_multifit_nlinear_driver(CURVEFIT_LM_ITERATIONS * 5, 1e-8, 1e-8, 1e-8,
+                                NULL, NULL, &info, w);
+
+    const gsl_vector *p = gsl_multifit_nlinear_position(w);
+    double na = a_from_t(gsl_vector_get(p, 0));
+    double nb = gsl_vector_get(p, 1), nc = gsl_vector_get(p, 2);
+    if (isfinite(na) && isfinite(nb) && isfinite(nc)) {
+        *a = na;
+        *b = nb;
+        *c = nc;
     }
 
-    *a = gsl_vector_get(co, 0);
-    *b = gsl_vector_get(co, 1);
-    *c = gsl_vector_get(co, 2);
-
-    gsl_permutation_free(p);
-    gsl_vector_free(delta);
     gsl_vector_free(co);
-    gsl_vector_free(Jty);
-    gsl_vector_free(yv);
-    gsl_matrix_free(JtJ);
-    gsl_matrix_free(J);
+    gsl_multifit_nlinear_free(w);
+    gsl_set_error_handler(old_handler);
 }
 
 /*
