@@ -72,8 +72,7 @@ cd ~/Diplomka
 ### 4.1 Real-hardware tuning sessions (the deployed path)
 
 ```bash
-K=~/KTT/Examples/ClTuneGemm
-./ClTuneGemm 0 0 $K/ClTuneGemm.cu $K/ClTuneGemmReference.cu \
+~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu \
     <X> [mode] [histHW] [fast] [overhead_us] [fit_start]
 ```
 
@@ -95,13 +94,12 @@ export CUDA_CACHE_DISABLE=1
 
 Examples:
 ```bash
-
-
 # one hybrid session, as in the experiments (RTX 5050, overhead 68.2 ms)
-~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu  ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 5050 fast 68220
+~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 10000 hybrid 5050 fast 68220
 
 # reference sweep over the whole space (5788 configs)
 ~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 5788 ref 5050
+
 # many sessions overnight (modes interleaved, resumable)
 ./run_sessions.sh 1000 ~/sessions_1000
 ```
