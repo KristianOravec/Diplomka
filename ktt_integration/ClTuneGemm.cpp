@@ -1,65 +1,22 @@
 // =============================================================================
-// ClTuneGemm.cpp -- KTT GEMM example driven by the CI tuning-budget library.
+// ClTuneGemm.cpp -- KTT GEMM example driven by the tuning-budget library.
 //
-// Drop-in replacement for KTT's Examples/ClTuneGemm/ClTuneGemm.cpp.
+// Instead of tuner.Tune(), one configuration is tuned per TuneIteration() call
+// and pushed to the library, which decides when to stop. The rest of the X
+// executions run the best configuration found.
 //
-// CHANGES vs the stock example:
-//   1. tuner.Tune() is replaced by a loop of tuner.TuneIteration() calls --
-//      each call benchmarks ONE configuration, and the loop performs tuning
-//      only for as long as the CI tuner library says it is worth it.
-//   2. The user specifies how many times CITuneGemm runs (X, command-line
-//      argument 5). Tuning steps AND production GEMM executions both draw
-//      from this budget: the library decides the split.
-//   3. Per tuning step the measured KTT overhead (result.GetKernelOverhead())
-//      is folded into the per-step cost pushed to the library, so the stop
-//      decision uses MEASURED overhead, not an assumed constant.
-//      NOTE: the CUDA backend leaves GetKernelOverhead() at 0, so the actual
-//      per-step cost is taken as WALL-CLOCK around TuneIteration() (kernel +
-//      NVRTC compilation + searcher + host overhead); overhead = wall - kernel.
-//   4. Historical data is precomputed offline by Python
-//      (src/precompute_historical.py -> historical_params.csv) and loaded by
-//      historical_cache at initiate_kernel() time -- nothing is
-//      recomputed here. Point TUNER_HISTORICAL_PARAMS at the CSV or place it
-//      next to the binary. Historical CSV data itself must be reachable at
-//      raw-data/raw-autotuning-data/... relative to the CWD.
-//   5. Optional final argument "probe" = OVERTUNING PROBE mode. The tuner
-//      NEVER stops: it benchmarks configurations through the WHOLE X budget,
-//      records the shadow stop -- the step where the engine WOULD have
-//      stopped, visible as the first budget=0 row in the CSV -- plus the
-//      fresh per-step estimate (tuner_raw_recommendation, which ignores the
-//      library's stop latch) in the raw_est column. Offline regret analysis:
-//      testing/ktt_testing/analyze_probe.py.
+// Usage:
+//   ./ClTuneGemm [platform] [device] [kernelFile] [refKernelFile] <X>
+//                [mode: live|hybrid|hist|ref] [histHW] [fast] [overhead_us]
+//                [fit_start]
+//   e.g. ./ClTuneGemm 0 0 ClTuneGemm.cu ClTuneGemmReference.cu 10000 hybrid 5050 fast 68220
 //
-// BUILD (from the KTT build tree that already produced libktt):
-//   g++ -O2 -std=c++17 -I<KTT>/include -I<Diplomka>/src \
-//       ClTuneGemm.cpp <Diplomka>/src/tuner_api.c <Diplomka>/src/evaluator.c \
-//       <Diplomka>/src/curvefit.c <Diplomka>/src/csv.c \
-//       <Diplomka>/src/historical_cache.c <Diplomka>/src/minicsv.c \
-//       -o ClTuneGemm -lKtt -lgsl -lgslcblas -llbfgs -lm -fopenmp
+//   ref   : random search for X steps without the library; histHW = GPU name,
+//           writes <gpu>-gemm-reduced_output.csv and <gpu>-reference_steps.csv
+//   fast  : stop right after tuning stops (production cost is computed offline)
 //
-// USAGE:
-//   ./ClTuneGemm [platform] [device] [kernelFile] [referenceKernelFile] \
-//                <X: #executions> [mode: live|hybrid|hist|ref] [histHW] \
-//                [fast] [overhead_us] [fit_start] [probe]
-//   X is REQUIRED. Example:
-//     ./ClTuneGemm 0 0 ClTuneGemm.cu ClTuneGemmReference.cu \
-//         10000 hybrid 1070 - 31742
-//   ("-" in the fast slot means "not fast"; anything other than "fast" works.
-//   "probe" (the final slot) flips on OVERTUNING PROBE mode -- see CHANGES 5.
-//   A numeric final slot is still read as fit_start, default 10.)
-//
-// KNOWN LIMITATIONS (state these in any write-up)
-//   * Output validation is OFF (rapidTest). A configuration that is fast
-//     because it computes the WRONG result would not be rejected.
-//   * Step 1's measured cost includes one-off config-space initialisation and
-//     the matrix upload (~3x a normal step). It is pushed at step 2 with
-//     step 2's overhead instead; the CSV keeps the real value.
-//   * The historical cache keys O_hist (hybrid) on the EXACT overhead value.
-//     A measured overhead such as 31742 is not in the default precompute grid,
-//     so hybrid runs MISS the cache and recompute O_hist at init. Add the
-//     overhead you pass here to OVERHEAD_LIST in precompute_historical.py to
-//     get a cache hit. (Confirm with a -DTUNER_DEBUG=1 build: look for
-//     "O_hist from CACHE" vs "COMPUTED (cache miss)".)
+// Limitations: output validation is off (rapidTest); failed configs are not
+// pushed (their time is reported at the end).
 // =============================================================================
 
 #include <iostream>
@@ -91,11 +48,7 @@ const std::string kernelPrefix = "../";
     const auto computeApi = ktt::ComputeApi::OpenCL;
 #endif
 
-// Toggle rapid test. true DISABLES output validation: the reference kernel is
-// never compared against, so a configuration that is fast because it computes
-// the WRONG result would not be rejected (and could become "best"). Kept on
-// because validation makes every tuning step much slower; set false for one
-// sweep to confirm the fastest configurations produce correct output.
+// true = no output validation (much faster; a wrong-but-fast config is not rejected)
 const bool rapidTest = true;
 
 // Toggle kernel profiling.
@@ -109,6 +62,135 @@ bool IsMultiple(const size_t a, const size_t b)
 {
     return ((a / b) * b == a) ? true : false;
 };
+
+// One tuning step, timed: KTT picks the next config, compiles it and runs it.
+// wallUs = the whole step (compile + run + KTT bookkeeping).
+struct TimedStep
+{
+    ktt::KernelResult result;
+    double kernelUs;
+    double wallUs;
+};
+
+TimedStep RunTimedStep(ktt::Tuner& tuner, ktt::KernelId kernel)
+{
+    const auto start = std::chrono::steady_clock::now();
+    ktt::KernelResult result = tuner.TuneIteration(kernel, {});
+    const auto end = std::chrono::steady_clock::now();
+
+    const double kernelUs = static_cast<double>(result.GetKernelDuration()) / 1000.0;
+    const double wallUs = std::chrono::duration<double, std::micro>(end - start).count();
+    return {result, kernelUs, wallUs};
+}
+
+// ---- ref mode helpers --------------------------------------------------------
+
+// Value of one tuning parameter in a configuration, e.g. "MWG" -> "64".
+std::string GetParameterValue(const ktt::KernelConfiguration& config, const std::string& name)
+{
+    for (const auto& pair : config.GetPairs())
+    {
+        if (pair.GetName() == name)
+            return pair.GetValueString();
+    }
+    return "";
+}
+
+// Write all results as a pool CSV in Jarda's <GPU>-gemm-reduced_output.csv layout.
+void WritePoolCsv(const std::string& path, const std::vector<ktt::KernelResult>& results)
+{
+    static const std::vector<std::string> parameterNames = {
+        "MWG", "NWG", "KWG", "MDIMC", "NDIMC", "MDIMA", "NDIMB", "KWI",
+        "VWM", "VWN", "STRM", "STRN", "SA", "SB", "PRECISION"};
+
+    std::ofstream pool(path);
+
+    // header
+    pool << "Kernel name,Computation duration (us),Global size,Local size";
+    for (const auto& name : parameterNames)
+        pool << "," << name;
+    pool << ",Maximum work-group size,Local memory size,Private memory size,"
+            "Constant memory size,Registers count\n";
+
+    // one row per tested configuration
+    for (const auto& result : results)
+    {
+        const ktt::ComputationResult& run = result.GetResults().front();
+
+        pool << run.GetKernelFunction() << ","
+             << run.GetDuration() / 1000.0 << ","              // ns -> us
+             << run.GetGlobalSize().GetTotalSize() << ","
+             << run.GetLocalSize().GetTotalSize();
+
+        for (const auto& name : parameterNames)
+            pool << "," << GetParameterValue(result.GetConfiguration(), name);
+
+        if (run.HasCompilationData())
+        {
+            const auto& compiled = run.GetCompilationData();
+            pool << "," << compiled.m_MaxWorkGroupSize
+                 << "," << compiled.m_LocalMemorySize
+                 << "," << compiled.m_PrivateMemorySize
+                 << "," << compiled.m_ConstantMemorySize
+                 << "," << compiled.m_RegistersCount;
+        }
+        else
+        {
+            pool << ",,,,,";
+        }
+        pool << "\n";
+    }
+}
+
+// Random search for up to totalRuns steps without the library.
+// Logs every step to logPath and returns all successful results.
+std::vector<ktt::KernelResult> RunReferenceSearch(ktt::Tuner& tuner, ktt::KernelId kernel,
+                                                  uint64_t totalRuns, const std::string& logPath)
+{
+    std::ofstream log(logPath);
+    log << "step,kernel_us,overhead_us,total_us,new_best\n";
+
+    std::vector<ktt::KernelResult> results;
+    double bestKernelUs = std::numeric_limits<double>::infinity();
+    uint64_t failed = 0;
+
+    for (uint64_t step = 1; step <= totalRuns; ++step)
+    {
+        const TimedStep timed = RunTimedStep(tuner, kernel);
+
+        if (timed.result.GetStatus() != ktt::ResultStatus::Ok)
+        {
+            if (++failed > 1000)
+            {
+                std::cerr << "too many failures\n";
+                break;
+            }
+            continue;                                   // skip failed configs
+        }
+
+        const double kernelUs = timed.kernelUs;
+        const double wallUs = timed.wallUs;
+        const double overheadUs = wallUs - kernelUs;
+        const bool isNewBest = kernelUs < bestKernelUs;
+
+        results.push_back(timed.result);
+        log << step << "," << kernelUs << "," << overheadUs << ","
+            << wallUs << "," << (isNewBest ? 1 : 0) << "\n";
+
+        if (isNewBest)
+            bestKernelUs = kernelUs;
+
+        std::cout << "ref step " << step << "/" << totalRuns << ": kernel "
+                  << kernelUs << " us" << (isNewBest ? "  <-- best" : "") << "\n";
+    }
+
+    if (!results.empty())
+    {
+        std::cout << "Reference search done: best kernel " << bestKernelUs << " us (config: "
+                  << tuner.GetBestResult(results).GetConfiguration().GetString() << ")\n";
+    }
+    return results;
+}
 
 int main(int argc, char** argv)
 {
@@ -137,16 +219,14 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---- CI-tuner arguments -------------------------------------------------
-    // X: how many times the user wants to run CITuneGemm. REQUIRED. Tuning
-    // steps and post-tuning production executions both draw from this budget;
-    // the library decides how many of the X executions are tuning steps.
+    // ---- tuner arguments ----------------------------------------------------
+    // X = total GEMM executions (tuning steps + production runs). Required.
     if (argc < 6)
     {
         std::cerr << "Missing required argument: <X: number of CITuneGemm executions>\n";
         std::cerr << "Usage: " << argv[0] << " [platform] [device] [kernelFile] [referenceKernelFile]"
                   << " <X> [mode: live|hybrid|hist|ref] [histHW]"
-                  << " [fast] [overhead_us] [fit_start, default 10] [probe]\n";
+                  << " [fast] [overhead_us] [fit_start, default 10]\n";
         return 1;
     }
     const uint64_t totalRuns = std::stoull(std::string(argv[5]));
@@ -157,46 +237,25 @@ int main(int argc, char** argv)
     }
     const std::string modeStr = (argc >= 7) ? argv[6] : "live";
     const std::string histHW = (argc >= 8) ? argv[7] : "680";
-    // "fast" (argv[8]): stop the program right after the tuner's stop
-    // decision -- production runs convey no information about the DECISION
-    // (session cost is computable: tuning sum + (X-S)*best), so skipping
-    // them turns a ~50-minute experiment into a ~3-minute one. Use for
-    // multi-seed testing of the stop decision itself.
+    // fast: stop after the stop decision; cost = tuning sum + (X - S) * best
     const bool fastMode = (argc >= 9 && std::string(argv[8]) == "fast");
-    // Overhead (argv[9], us): feeds the HISTORICAL fit at init (history_run's
-    // oracle scan prices each draw at kernel+overhead). The LIVE cost model is
-    // unaffected -- it uses the per-step measured totals from push_result.
-    // Default 0 = tuning treated as free in the historical fit, which makes
-    // O_hist too deep. Harmless for live mode (no history used), WRONG for
-    // hybrid and hist -- see the warning after the mode is resolved.
+    // overhead (us): used only for the historical values (O_hist, a, b);
+    // live decisions use the measured per-step cost
     const uint64_t cfgOverhead = (argc >= 10) ? std::stoull(std::string(argv[9])) : 0;
-    // fit_start (argv[10]): warmup steps before the first curve fit. The
-    // library makes NO stop decision before step fit_start + 6, so at high
-    // overhead this -- not the fitted curve -- effectively sets the stop.
-    // Exposed as an argument so that effect can be measured directly.
-    // probe (argv[10], literal word): OVERTUNING PROBE mode -- the tuner
-    // never stops and benchmarks every configuration through the whole X
-    // budget, recording the shadow stop and the fresh raw_est estimate for
-    // offline regret analysis (see CHANGES 5). When the slot holds the word
-    // "probe" instead of a number, fit_start falls back to its default.
-    const bool probeMode = (argc >= 11 && std::string(argv[10]) == "probe");
-    const uint64_t fitStart = (argc >= 11 && !probeMode)
-                                  ? std::stoull(std::string(argv[10]))
-                                  : 10;
-    // Matrix dimension is fixed at compile time by useProfiling. It is recorded
-    // in the output tag because mixing results from different sizes silently
-    // invalidates any comparison (2048^3 and 4096^3 differ ~8x in work).
+    const uint64_t fitStart = (argc >= 11) ? std::stoull(std::string(argv[10])) : 10;
+    // matrix size is part of the output name (results of different sizes don't mix)
     constexpr uint32_t kMatSize = useProfiling ? 4096 / 2 : 4096;
-    // Output files carry the full input signature, so runs never overwrite:
-    //   tuning_steps_<X>_<mode>_hist<hw>_rand_n<size>_fs<fit_start>
-    //                [_fast][_oh<overhead>].csv
+    // tuning_steps_<X>_<mode>_hist<hw>_rand_n<size>_fs<fit_start>[_fast][_oh<us>].csv
     std::string tag = std::to_string(totalRuns) + "_" + modeStr + "_hist" + histHW
                     + "_rand"
                     + "_n" + std::to_string(kMatSize)
                     + "_fs" + std::to_string(fitStart);
     if (fastMode) tag += "_fast";
     if (cfgOverhead > 0) tag += "_oh" + std::to_string(cfgOverhead);
-    if (probeMode) tag += "_probe";
+    // ref mode: the 7th argument names the GPU being measured (e.g. 5050);
+    // outputs are <gpu>-gemm-reduced_output.csv (Jarda's layout) and
+    // <gpu>-reference_steps.csv
+    const std::string refGpu = histHW;
 
     TunerMode tunerMode = TUNER_MODE_LIVE;
     double k = 1.0;
@@ -215,9 +274,13 @@ int main(int argc, char** argv)
         std::cerr << "Unknown mode '" << modeStr << "' (use live|hybrid|hist|ref)\n";
         return 1;
     }
+    if (modeStr == "ref" && argc < 8)
+    {
+        std::cerr << "ref mode needs the GPU name, e.g. ... 5788 ref 5050\n";
+        return 1;
+    }
 
-    // The historical inputs are priced with cfgOverhead. At 0 the fit treats
-    // tuning as free and O_hist comes out too deep -- a silent, wrong result.
+    // overhead 0 makes the historical values wrong (tuning treated as free)
     if ((tunerMode == TUNER_MODE_HYBRID || tunerMode == TUNER_MODE_HISTORICAL)
         && cfgOverhead == 0)
     {
@@ -229,18 +292,16 @@ int main(int argc, char** argv)
                   << "median overhead_us of a reference sweep.\n";
     }
 
-    // One line summarising the run, so every log states its own conditions.
     std::cout << "CONFIG: X=" << totalRuns << " mode=" << modeStr
               << " hist=" << histHW << " searcher=rand"
               << " n=" << kMatSize << " fit_start=" << fitStart
               << " overhead_us=" << cfgOverhead
-              << (fastMode ? " fast" : "") << (probeMode ? " probe" : "") << "\n";
+              << (fastMode ? " fast" : "") << "\n";
 
     uint32_t kSizeM;
     uint32_t kSizeN;
     uint32_t kSizeK;
 
-    // Single source of truth: kMatSize (defined above, also in the tag).
     kSizeM = kMatSize;
     kSizeN = kMatSize;
     kSizeK = kMatSize;
@@ -378,25 +439,14 @@ int main(int argc, char** argv)
         tuner.SetReferenceKernel(matCId, referenceKernel, ktt::KernelConfiguration());
     }
 
-    // The stock example pre-heated with tuner.Tune(kernel, TuningDuration(300))
-    // and then re-tuned with tuner.Tune(kernel). Both are replaced by one
-    // library-driven loop: TuneIteration() benchmarks exactly ONE
-    // configuration per call, we feed the measured duration + measured
-    // overhead to the CI tuner, and it answers how many more tuning steps are
-    // worth performing (0 = stop). The remaining X budget is spent running
-    // the GEMM with the best configuration found.
+    // ---- tuning-budget library ----------------------------------------------
     KernelConfig cfg = {};
     cfg.total_kernel_runs = totalRuns; // X
-    cfg.overhead = cfgOverhead;        // feeds the HISTORICAL fit; live cost model
-                                       // uses per-step measured totals (push_result)
+    cfg.overhead = cfgOverhead;        // for the historical values only
     cfg.fit_start = fitStart;
     cfg.mode = tunerMode;
     cfg.k = k;
-    // Historical data source: resolved at init from the PRECOMPUTED table
-    // (historical_params.csv, generated by src/precompute_historical.py) with
-    // a compute fallback on miss. See file header for TUNER_HISTORICAL_PARAMS
-    // and the KNOWN LIMITATIONS note on O_hist cache misses.
-    cfg.hist_HW = histHW.c_str();
+    cfg.hist_HW = histHW.c_str();      // a, b / O_hist from historical_params.csv or computed
     cfg.file_name = "gemm-reduced_output.csv";
     cfg.hist_number_of_tests = 1000;
 
@@ -408,130 +458,49 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // RandomSearcher: random order WITHOUT replacement over the whole space
-    // (the offline harness samples WITH replacement -- a small, known difference).
+    // random order, no repeats
     tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
 
-    // ---- REFERENCE MODE (mode "ref") --------------------------------------
-    // Pure random search for R = X iterations, NO CI tuner. Produces
-    // reference_steps_<tag>.csv in the same format as tuning_steps so the
-    // comparison script can compute the oracle-proxy session cost T*(X)
-    // (the best achievable stop on this hardware) and the real decline% of
-    // a CI-tuner session against it -- the real-hardware twin of the
-    // work_*/seeds_* C_decl% / Py_decl% columns.
+    // ---- ref mode: random search for X steps, no library; writes the pool CSV
     if (modeStr == "ref")
     {
-        std::ofstream refLog("reference_steps_" + tag + ".csv");
-        refLog << "step,kernel_us,overhead_us,total_us,new_best\n";
-        double bestRefUs = std::numeric_limits<double>::infinity();
-        std::vector<ktt::KernelResult> refResults;
-        uint64_t refFailed = 0;
-        for (uint64_t step = 1; step <= totalRuns; ++step)
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            ktt::KernelResult result = tuner.TuneIteration(kernel, {});
-            const auto t1 = std::chrono::steady_clock::now();
-            if (result.GetStatus() != ktt::ResultStatus::Ok)
-            {
-                if (++refFailed > 1000) { std::cerr << "too many failures\n"; break; }
-                continue;
-            }
-            const double kernelUs = static_cast<double>(result.GetKernelDuration()) / 1000.0;
-            const double wallUs = std::chrono::duration<double, std::micro>(t1 - t0).count();
-            refResults.push_back(result);
-            refLog << step << "," << kernelUs << "," << wallUs - kernelUs << ","
-                   << wallUs << "," << (kernelUs < bestRefUs ? 1 : 0) << "\n";
-            if (kernelUs < bestRefUs)
-                bestRefUs = kernelUs;
-            std::cout << "ref step " << step << "/" << totalRuns << ": kernel "
-                      << kernelUs << " us" << (kernelUs == bestRefUs ? "  <-- best" : "") << "\n";
-        }
-        refLog.close();
+        const std::vector<ktt::KernelResult> refResults =
+            RunReferenceSearch(tuner, kernel, totalRuns, refGpu + "-reference_steps.csv");
+
         if (!refResults.empty())
         {
-            const ktt::KernelResult best = tuner.GetBestResult(refResults);
-            std::cout << "Reference search done: best kernel " << bestRefUs
-                      << " us (config: " << best.GetConfiguration().GetString() << ")\n";
-            tuner.SaveResults(refResults, "GemmOutput_" + tag, ktt::OutputFormat::XML);
+            tuner.SaveResults(refResults, refGpu + "-GemmOutput", ktt::OutputFormat::XML);
 
-            // Pool in Jarda's <GPU>-gemm-reduced_output.csv layout (KTT 2.x
-            // has no CSV output). No profiler counters.
-            static const char* kParams[] = {"MWG", "NWG", "KWG", "MDIMC", "NDIMC",
-                "MDIMA", "NDIMB", "KWI", "VWM", "VWN", "STRM", "STRN", "SA", "SB",
-                "PRECISION"};
-            std::ofstream pool("pool_" + tag + "-gemm-reduced_output.csv");
-            pool << "Kernel name,Computation duration (us),Global size,Local size";
-            for (const char* p : kParams)
-                pool << "," << p;
-            pool << ",Maximum work-group size,Local memory size,Private memory size,"
-                    "Constant memory size,Registers count\n";
-            for (const auto& r : refResults)
-            {
-                const ktt::ComputationResult& cr = r.GetResults().front();
-                pool << cr.GetKernelFunction() << "," << cr.GetDuration() / 1000.0 << ","
-                     << cr.GetGlobalSize().GetTotalSize() << ","
-                     << cr.GetLocalSize().GetTotalSize();
-                for (const char* p : kParams)
-                {
-                    std::string value;
-                    for (const auto& pair : r.GetConfiguration().GetPairs())
-                        if (pair.GetName() == p)
-                            value = pair.GetValueString();
-                    pool << "," << value;
-                }
-                if (cr.HasCompilationData())
-                {
-                    const auto& cd = cr.GetCompilationData();
-                    pool << "," << cd.m_MaxWorkGroupSize << "," << cd.m_LocalMemorySize
-                         << "," << cd.m_PrivateMemorySize << "," << cd.m_ConstantMemorySize
-                         << "," << cd.m_RegistersCount;
-                }
-                else
-                    pool << ",,,,,";
-                pool << "\n";
-            }
-            std::cout << "Pool written: pool_" << tag << "-gemm-reduced_output.csv\n";
+            const std::string poolPath = refGpu + "-gemm-reduced_output.csv";
+            WritePoolCsv(poolPath, refResults);
+            std::cout << "Pool written: " << poolPath << "\n";
         }
-        release_kernel(handle);   // was leaked: initiate_kernel ran above
+        release_kernel(handle);
         return 0;
     }
 
     std::vector<ktt::KernelResult> tuningResults;
     tuningResults.reserve(totalRuns);
 
-    uint64_t runsDone = 0;      // executions consumed from X
-    uint64_t tuningSteps = 0;   // of those, how many were tuning steps
+    uint64_t runsDone = 0;      // executions used from X
+    uint64_t tuningSteps = 0;   // of those, tuning steps
     uint64_t failedIterations = 0;
-    // Wall time spent on FAILED configurations. It is real tuning cost, but a
-    // failed config yields no timing, so it is never pushed to the library and
-    // the cost model does not see it. Tracked here so the omission is visible
-    // in the summary rather than silent.
-    double failedWallUs = 0.0;
-    const uint64_t failureCap = 1000; // safety against a pathological config space
+    double failedWallUs = 0.0;  // time of failed configs (not seen by the library)
+    const uint64_t failureCap = 1000;
     bool tuning = true;
-    // Probe mode only: the step where the engine WOULD have stopped (first
-    // remainingBudget == 0), kept for the probe-aware summary. 0 = never.
-    uint64_t shadowStopStep = 0;
     ktt::KernelConfiguration bestConfiguration{};
 
-    // Per-step CSV (tuning_steps.csv): step, kernel_us, overhead_us,
-    // total_us, new_best, remaining budget -- the real-tuning analog of the
-    // work_*/result.txt tables for offline comparison.
     std::ofstream stepLog("tuning_steps_" + tag + ".csv");
     stepLog << "step,kernel_us,overhead_us,total_us,new_best,budget,raw_est\n";
     double bestKernelUs = std::numeric_limits<double>::infinity();
 
-    // Step 1 is held and pushed at step 2 (see below).
+    // step 1 is held back and pushed at step 2 (see below)
     bool havePending = false;
     double pendingKernelUs = 0.0;
     double pendingWallUs = 0.0;
 
-    // Query the decision ONCE per push and write one row, returning the budget
-    // so the logged value is guaranteed to be the one acted on. raw_est is the
-    // FRESH per-step estimate (tuner_raw_recommendation): it ignores the
-    // library's latched countdown/stop, so after the latch it keeps reporting
-    // what the curve would advise right now. Rows feed the offline comparison
-    // against the validate_total_runtime harness (work_* directories).
+    // ask the library once per push, log one CSV row, return the budget
+    // (raw_est = fresh estimate that ignores the stop latch)
     auto logRow = [&](uint64_t step, double kUs, double ohUs) -> uint64_t
     {
         const uint64_t budget = find_number_of_steps_that_should_be_tuning(handle);
@@ -549,23 +518,12 @@ int main(int argc, char** argv)
     {
         if (tuning)
         {
-            // ONE tuning iteration: benchmarks a single configuration chosen
-            // by the searcher (first call also initializes the config space).
-            // Wall-clock around the call is the TRUE per-step cost: kernel
-            // runtime + NVRTC compilation + searcher + host overhead. The
-            // CUDA backend leaves KernelResult::GetKernelOverhead() at 0, so
-            // this measured total replaces the (empty) KTT field.
-            const auto iterStart = std::chrono::steady_clock::now();
-            ktt::KernelResult result = tuner.TuneIteration(kernel, {});
-            const auto iterEnd = std::chrono::steady_clock::now();
-            const double wallUs =
-                std::chrono::duration<double, std::micro>(iterEnd - iterStart).count();
+            const TimedStep timed = RunTimedStep(tuner, kernel);
+            const double wallUs = timed.wallUs;
 
-            if (result.GetStatus() != ktt::ResultStatus::Ok)
+            if (timed.result.GetStatus() != ktt::ResultStatus::Ok)
             {
-                // Failed configs don't produce usable timing data; they also
-                // don't count as GEMM executions. Guard against a space that
-                // never succeeds. Their wall time is still accumulated.
+                // failed config: no timing, not a GEMM execution
                 failedWallUs += wallUs;
                 if (++failedIterations > failureCap)
                 {
@@ -574,17 +532,14 @@ int main(int argc, char** argv)
                 }
                 continue;
             }
-            // total_time = measured full cost of trying this config (wall
-            // clock); overhead = wall clock minus the kernel's own runtime.
-            const double kernelTimeUs = static_cast<double>(result.GetKernelDuration()) / 1000.0;
+            const double kernelTimeUs = timed.kernelUs;
             const double overheadUs = wallUs - kernelTimeUs;
             ++runsDone;
             ++tuningSteps;
-            tuningResults.push_back(result);
+            tuningResults.push_back(timed.result);
 
-            // Step 1's overhead includes one-off setup (~3x a normal step), so
-            // it is pushed at step 2 with step 2's overhead instead. The CSV
-            // still logs the real value.
+            // step 1 includes one-off setup (~3x a normal step): push it later
+            // with step 2's overhead; the CSV keeps the real value
             if (tuningSteps == 1)
             {
                 havePending = true;
@@ -603,49 +558,26 @@ int main(int argc, char** argv)
 
             if (remainingBudget == 0)
             {
-                if (probeMode)
-                {
-                    // Overtuning probe: the engine says stop here, but the
-                    // probe deliberately does NOT stop and does NOT latch
-                    // anything itself -- the LIBRARY latches `stopped`, so
-                    // find_number... keeps returning 0 from here on (that 0
-                    // in the budget column IS the shadow-stop marker) while
-                    // raw_est keeps reporting the fresh estimate. push_result
-                    // continues every step (the library still updates
-                    // best_configs/averages after its latch -- needed).
-                    if (shadowStopStep == 0)
-                    {
-                        shadowStopStep = tuningSteps;
-                        std::cout << "shadow stop at step " << tuningSteps
-                                  << " (probe: continuing to tune)\n";
-                    }
-                }
-                else
-                {
-                    tuning = false;
-                    bestConfiguration = tuner.GetBestConfiguration(kernel);
-                    std::cout << "CI tuner stopped tuning after " << tuningSteps << " steps; "
-                              << "spending the remaining " << (totalRuns - runsDone)
-                              << " executions with the best configuration\n";
-                }
+                tuning = false;
+                bestConfiguration = tuner.GetBestConfiguration(kernel);
+                std::cout << "CI tuner stopped tuning after " << tuningSteps << " steps; "
+                          << "spending the remaining " << (totalRuns - runsDone)
+                          << " executions with the best configuration\n";
             }
         }
         else
         {
             if (fastMode)
             {
-                // Production conveys no decision information; the session
-                // cost is computed arithmetically from the tuning log, so
-                // end the experiment here (multi-seed testing mode).
-                break;
+                break;   // production cost is computed from the CSV
             }
-            // Production phase: run the actual GEMM with the best config.
+            // production run with the best configuration
             (void)tuner.Run(kernel, bestConfiguration, {});
             ++runsDone;
         }
     }
 
-    // No step 2 happened: push step 1 with its real cost.
+    // no step 2 happened: push step 1 with its real cost
     if (havePending)
     {
         push_result(handle, pendingKernelUs, pendingWallUs);
@@ -655,24 +587,8 @@ int main(int argc, char** argv)
 
     if (tuning)
     {
-        // tuning is only ever still true here in the budget-exhausted path or
-        // in probe mode (where tuning deliberately NEVER turns false).
-        if (probeMode)
-        {
-            if (shadowStopStep > 0)
-                std::cout << "probe complete: shadow stop at step " << shadowStopStep
-                          << "; tuned through all " << totalRuns
-                          << " configurations\n";
-            else
-                std::cout << "probe complete: no shadow stop within " << totalRuns
-                          << " steps; tuned through all " << totalRuns
-                          << " configurations\n";
-        }
-        else
-        {
-            // X was exhausted while still tuning (library never said stop).
-            std::cout << "Execution budget spent while still tuning; using best configuration found so far\n";
-        }
+        // X ran out before the library said stop
+        std::cout << "Execution budget spent while still tuning; using best configuration found so far\n";
         if (!tuningResults.empty())
         {
             bestConfiguration = tuner.GetBestConfiguration(kernel);
