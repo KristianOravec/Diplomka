@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Runs N real KTT sessions per mode (live, hybrid, hist) on the GPU, one folder each.
+# Usage: ./run_sessions.sh [sessions_per_mode=1000] [output_dir=~/sessions_1000]
+# Resumable: finished sessions are skipped. Progress: <output_dir>/progress.log
+
 
 SESSIONS_PER_MODE=${1:-1000}
 OUTPUT_DIR=${2:-$HOME/sessions_1000}
@@ -9,7 +13,7 @@ RAW_DATA=$HOME/Diplomka/raw-data
 
 TOTAL_RUNS=10000
 HISTORY_GPU=5050
-OVERHEAD_US=68220
+OVERHEAD_US=68220 # median per-step overhead, see results_5050/overhead_median.py
 FIT_START=10
 
 export CUDA_CACHE_DISABLE=1
