@@ -104,7 +104,7 @@ static uint64_t tuner_local_budget(uint64_t current, uint64_t total,
 
 static uint64_t blend_with_history(uint64_t live_estimate, uint64_t step,
                                    uint64_t o_hist) {
-    double live_weight = (double)step / (double)o_hist;
+    double live_weight = (double)step / (double)o_hist; // x / o_hist
     if (live_weight > 1.0)
         live_weight = 1.0;
     double history_weight = 1.0 - live_weight;
@@ -251,8 +251,6 @@ void set_total_runs(KernelHandle *handle, uint64_t total_kernel_runs) {
     /* NOTE: in HYBRID mode this does not recompute O_hist (see header note). */
 }
 
-/* ---- push ---- */
-
 void push_result(KernelHandle *handle, double kernel_time_us, double total_time_us) {
     if (!handle)
         return;
@@ -287,7 +285,7 @@ void push_result(KernelHandle *handle, double kernel_time_us, double total_time_
     if (handle->budget > 0)
         handle->budget--;
 
-    bool found_faster_kernel = (kernel_time_us < handle->best_config);
+    bool found_faster_kernel = kernel_time_us < handle->best_config;
 
     if (warmup_done(handle)) {
         uint64_t new_budget = estimate_budget(handle, i);
