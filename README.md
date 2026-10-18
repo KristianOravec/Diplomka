@@ -14,7 +14,14 @@ The project is organized into the following directories:
 - `raw-data/`: Jarda's data
 - `obsolete/`: ignore, just some old scripts that are no longer needed but kept just in case
 - `output`: my output from `src/` engine
+- `results_5050`: [results_5050/README.md](results_5050/README.md)  
+
+Scripts available:
+- `run_all_seeds_parallel.sh`: compares total runtime of C engine with Jarda's python offline tuner results
 - `benchmark_c.py`: runs `src/` engine, C mirror to jarda's benchmark_suite_variations.py 
+- `run_sessions_cuda.sh`: run N real online CUDA sessions
+
+
 
 ### Historical cache
 
@@ -134,6 +141,8 @@ export LD_LIBRARY_PATH=$HOME/KTT/Build/x86_64_Release:$CUDA_PATH/lib64${LD_LIBRA
 ```
 
 ## 6. Experiment workflow (RTX 5050)
+### Every file needed in these steps is already available pre-generated in `Diplomka/results_5050`
+
 
 **1. Reference sweep:** every config once, gives the pool and the per-step overhead (GPU, ~10 min):
 ```bash
@@ -165,16 +174,3 @@ tail -n 1 ~/sessions_1000_v2/progress.log
 ```bash
 python3 results_5050/analyze.py
 ```
-
-## 7. Tests
-
-| test | command | checks | uses |
-|---|---|---|---|
-| C vs. Jarda's Python | `./run_all_seeds_parallel.sh 1000 "live hist hybrid" 1` | C decline % ≈ Python on Jarda's 37 configs | `validate_total_runtime.c`, `tuner_api`, `evaluator`, `curvefit`, raw-data |
-| Replay of real sessions | `./testing/replay_sessions.sh ~/sessions_1000_v2` | library re-stops exactly where each real session stopped; offline engine = online engine | `testing/replay_sessions.c`, `tuner_api`, `evaluator`, session CSVs |
-| Cost formula | `python3 testing/check_cost_formula.py` | `analyze.py` cost curve and oracle = brute force | 5050 pool |
-| Historical cache lookups | `gcc -std=gnu11 -Isrc testing/test_historical_cache.c src/historical_cache.c src/minicsv.c -o /tmp/thc && /tmp/thc` | hit/miss rules of `historical_params.csv` | `historical_cache`, `minicsv` |
-| Cache on = cache off | `python3 testing/test_cache_offline.py` | identical results with and without `historical_params.csv` | `libevaluator.so`, `historical_params.csv` |
-
-Expected: C vs. Python under 1 pp mean difference per mode; replay `ALL PASSED`;
-cost formula `PASSED`; cache tests 12/12 and 37/37 + 37/37.
