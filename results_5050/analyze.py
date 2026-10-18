@@ -6,7 +6,7 @@ import re
 import numpy as np
 import pandas as pd
 
-SESSIONS_DIR = "sessions_1000"
+SESSIONS_DIR = "results_5050/sessions_1000_v2"
 POOL_CSV = "raw-data/raw-autotuning-data/gemm-reduced/5050-gemm-reduced_output.csv"
 ENGINE_LIBRARY = "libevaluator.so"
 

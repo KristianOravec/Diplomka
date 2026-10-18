@@ -112,3 +112,69 @@ Outputs (named after the arguments, written to the current folder):
 
 Runs with the same arguments in the same folder overwrite each other,
 so use one folder per session (as `run_sessions.sh` does).
+
+
+## 5. Python environment & .bashrc vars
+
+Every Python script runs from the repo root inside one venv (tested with Python 3.14):
+
+```bash
+cd ~/Diplomka
+python3 -m venv venv              # once
+source venv/bin/activate          # in every new terminal
+pip install -r requirements.txt   # once: numpy, pandas, scipy
+```
+
+I use these defined variables in .bashrc: 
+
+```bash
+export CUDA_PATH=/usr/local/cuda
+export CUDA_CACHE_DISABLE=1 
+export LD_LIBRARY_PATH=$HOME/KTT/Build/x86_64_Release:$CUDA_PATH/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+## 6. Experiment workflow (RTX 5050)
+
+**1. Reference sweep:** every config once, gives the pool and the per-step overhead (GPU, ~10 min):
+```bash
+mkdir -p ~/ref_5050 && cd ~/ref_5050
+~/Diplomka/ClTuneGemm 0 0 ~/KTT/Examples/ClTuneGemm/ClTuneGemm.cu ~/KTT/Examples/ClTuneGemm/ClTuneGemmReference.cu 5788 ref 5050
+```
+Writes `5050-gemm-reduced_output.csv` (pool) and `5050-reference_steps.csv` (step log).
+Check `nvidia-smi` first: no other jobs on the GPU.
+
+**2. Median overhead:** the `overhead_us` value for everything below:
+```bash
+python3 results_5050/overhead_median.py ~/ref_5050/5050-reference_steps.csv
+```
+
+**3. New pool into the history** (optional, keep a backup of the old one):
+```bash
+cp ~/ref_5050/5050-gemm-reduced_output.csv raw-data/raw-autotuning-data/gemm-reduced/
+python3 src/precompute_historical.py          # refresh historical_params.csv
+```
+
+**4. Real sessions:** 1000 per mode, ~6.5 h, resumable (`OVERHEAD_US` inside the script):
+```bash
+nohup ./run_sessions.sh 1000 ~/sessions_1000_v2 > /dev/null 2>&1 &
+tail -n 1 ~/sessions_1000_v2/progress.log
+```
+
+**5. Analysis:** real sessions vs. the offline C engine vs. the oracle
+(set `SESSIONS_DIR` at the top of the script):
+```bash
+python3 results_5050/analyze.py
+```
+
+## 7. Tests
+
+| test | command | checks | uses |
+|---|---|---|---|
+| C vs. Jarda's Python | `./run_all_seeds_parallel.sh 1000 "live hist hybrid" 1` | C decline % ≈ Python on Jarda's 37 configs | `validate_total_runtime.c`, `tuner_api`, `evaluator`, `curvefit`, raw-data |
+| Replay of real sessions | `./testing/replay_sessions.sh ~/sessions_1000_v2` | library re-stops exactly where each real session stopped; offline engine = online engine | `testing/replay_sessions.c`, `tuner_api`, `evaluator`, session CSVs |
+| Cost formula | `python3 testing/check_cost_formula.py` | `analyze.py` cost curve and oracle = brute force | 5050 pool |
+| Historical cache lookups | `gcc -std=gnu11 -Isrc testing/test_historical_cache.c src/historical_cache.c src/minicsv.c -o /tmp/thc && /tmp/thc` | hit/miss rules of `historical_params.csv` | `historical_cache`, `minicsv` |
+| Cache on = cache off | `python3 testing/test_cache_offline.py` | identical results with and without `historical_params.csv` | `libevaluator.so`, `historical_params.csv` |
+
+Expected: C vs. Python under 1 pp mean difference per mode; replay `ALL PASSED`;
+cost formula `PASSED`; cache tests 12/12 and 37/37 + 37/37.
