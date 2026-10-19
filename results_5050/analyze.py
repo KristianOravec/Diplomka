@@ -24,6 +24,17 @@ RANDOM_SEED = 1
 MODES = ["live", "hybrid", "hist"]
 FIRST_DECISION_STEP = FIT_START + 5 + 2
 
+SESSION_FOLDER = re.compile(r".*/(live|hybrid|hist)_(\d+)/")
+
+US_PER_S = 1e6       # microseconds per second
+US_PER_MS = 1e3      # microseconds per millisecond
+
+# comparison table: header and rows share one layout, so the columns line up
+TABLE_HEADER = (f"{'mode':7} {'':8} {'stop med':>8} {'stop mean':>9} {'best ms':>8} "
+                f"{'cost s':>8} {'decl vs fixed':>13} {'decl vs hindsight':>17}")
+TABLE_ROW = ("{mode:7} {label:8} {stop_median:8.0f} {stop_mean:9.1f} {best_ms:8.2f} "
+             "{cost_s:8.1f} {vs_fixed:12.1f}% {vs_hindsight:16.1f}%")
+
 
 def total_cost_us(tuning_us, steps_tuned, best_kernel_us):
     production_runs = TOTAL_RUNS - steps_tuned
@@ -31,7 +42,11 @@ def total_cost_us(tuning_us, steps_tuned, best_kernel_us):
 
 
 def read_one_session(path):
-    mode, run = re.match(r".*/(live|hybrid|hist)_(\d+)/", path).groups()
+    match = SESSION_FOLDER.match(path)
+    if match is None:
+        raise ValueError(f"not a session folder: {path}")
+
+    mode, run = match.groups()
     steps = pd.read_csv(path)
 
     steps_tuned = len(steps)
@@ -41,19 +56,20 @@ def read_one_session(path):
     overhead_without_first_step = steps.overhead_us.iloc[1:]
     ended_by_library = steps.budget.iloc[-1] == 0
 
-    return dict(
-        mode=mode,
-        run=int(run),
-        stop=steps_tuned,
-        best=best_kernel_us,
-        tune_s=tuning_us / 1e6,
-        cost_s=cost_us / 1e6,
-        oh_med=overhead_without_first_step.median(),
-        bad=not ended_by_library,
-    )
+    return {
+        "mode": mode,
+        "run": int(run),
+        "stop": steps_tuned,
+        "best": best_kernel_us,
+        "tune_s": tuning_us / US_PER_S,
+        "cost_s": cost_us / US_PER_S,
+        "oh_med": overhead_without_first_step.median(),
+        "bad": not ended_by_library,
+    }
 
 
 def read_real_sessions():
+    # it will match on sessions_1000_v2 directory and its content
     paths = glob.glob(SESSIONS_DIR + "/*/tuning_steps_*.csv")
     paths = [path for path in paths if "/test_" not in path]
     return pd.DataFrame([read_one_session(path) for path in paths])
@@ -110,13 +126,14 @@ def mode_settings(engine):
 
     no_history = -1.0
     return {
-        "live":   dict(k=1.0, o_hist=0,      hist_a=no_history, hist_b=no_history),
-        "hybrid": dict(k=0.5, o_hist=o_hist, hist_a=no_history, hist_b=no_history),
-        "hist":   dict(k=0.0, o_hist=0,      hist_a=curve.a,    hist_b=curve.b),
+        "live":   {"k": 1.0, "o_hist": 0,      "hist_a": no_history, "hist_b": no_history},
+        "hybrid": {"k": 0.5, "o_hist": o_hist, "hist_a": no_history, "hist_b": no_history},
+        "hist":   {"k": 0.0, "o_hist": 0,      "hist_a": curve.a,    "hist_b": curve.b},
     }
 
 
 def cost_for_every_stop(kernels):
+    # Total cost (us) of stopping after each step 1..N: tuning so far + (X - s) * best kernel so far.
     steps = np.arange(1, len(kernels) + 1)
     tuning_us = np.cumsum(kernels + OVERHEAD_US)
     best_so_far = np.minimum.accumulate(kernels)
@@ -127,31 +144,37 @@ def simulate(engine, pool):
     modes = mode_settings(engine)
     rng = np.random.default_rng(RANDOM_SEED)
 
-    offline_rows = []
-    oracle_rows = []
-    summed_cost_curve = np.zeros(CONFIGS_PER_SESSION)
+    offline_rows = [] # one row per session and mode, 3000 in total.
+    oracle_rows = [] # one (best cost, best stop) pair per session, 1000 in total.
+    summed_cost_curve = np.zeros(CONFIGS_PER_SESSION) # 2000 zeros. Each session’s cost curve gets added in here, for the average later.
 
     for _ in range(SIMULATED_SESSIONS):
+        # one fake session: random configs without repeats, like KTT's random searcher
         kernels = rng.choice(pool, CONFIGS_PER_SESSION, replace=False)
         cost, best_so_far = cost_for_every_stop(kernels)
         summed_cost_curve += cost
 
+        # oracle: best possible stop for this session, with hindsight
         oracle_cost = cost.min()
         oracle_stop = cost.argmin() + 1
         oracle_rows.append((oracle_cost, oracle_stop))
 
+        # Ask the C engine where each mode (live, hybrid, hist) would stop in this session,
+        # then store that stop, the best kernel found by then, its total cost and the oracle's cost.
         for name, settings in modes.items():
             stop = engine.stop_step(kernels, settings)
-            offline_rows.append(dict(
-                mode=name,
-                stop=stop,
-                best=best_so_far[stop - 1],
-                cost_s=cost[stop - 1] / 1e6,
-                orc_s=oracle_cost / 1e6,
-            ))
+            offline_rows.append({
+                "mode": name,
+                "stop": stop,
+                "best": best_so_far[stop - 1],
+                "cost_s": cost[stop - 1] / US_PER_S,
+                "orc_s": oracle_cost / US_PER_S,
+            })
 
+    # average curve over all sessions; its minimum is the best fixed stop
     mean_cost_curve = summed_cost_curve / SIMULATED_SESSIONS
-    return pd.DataFrame(offline_rows), np.array(oracle_rows), mean_cost_curve
+    oracle = pd.DataFrame(oracle_rows, columns=["cost_us", "stop"])
+    return pd.DataFrame(offline_rows), oracle, mean_cost_curve
 
 
 def percent_worse(cost, reference):
@@ -159,36 +182,49 @@ def percent_worse(cost, reference):
 
 
 def print_comparison(real, offline, oracle, mean_cost_curve):
-    oracle_costs = oracle[:, 0]
-    oracle_stops = oracle[:, 1]
-    hindsight_cost = oracle_costs.mean() / 1e6
-    fixed_cost = mean_cost_curve.min() / 1e6
+    hindsight_cost = oracle.cost_us.mean() / US_PER_S
+    hindsight_stop = oracle.stop.mean()
+    fixed_cost = mean_cost_curve.min() / US_PER_S
     fixed_stop = mean_cost_curve.argmin() + 1
 
     print(f"oracle: hindsight mean cost {hindsight_cost:.1f} s "
-          f"(mean stop {oracle_stops.mean():.0f}) | "
+          f"(mean stop {hindsight_stop:.0f}) | "
           f"best FIXED stop {fixed_stop} -> {fixed_cost:.1f} s")
     print()
 
-    print(f"{'mode':7} {'':8} {'stop med':>8} {'stop mean':>9} {'best ms':>8} "
-          f"{'cost s':>8} {'decl vs fixed':>13} {'decl vs hindsight':>17}")
+    print(TABLE_HEADER)
 
     for mode in MODES:
-        real_sessions = real[real["mode"] == mode]
-        offline_sessions = offline[offline["mode"] == mode]
+        is_this_mode = real["mode"] == mode      # True/False for each row
+        real_sessions = real[is_this_mode]       # keep only the True rows
+
+        is_this_mode = offline["mode"] == mode    # True/False for each row
+        offline_sessions = offline[is_this_mode]  # keep only the True rows
 
         for label, sessions in [("REAL", real_sessions), ("offline", offline_sessions)]:
             mean_cost = sessions.cost_s.mean()
+
+            # % more expensive than always stopping at the best fixed step
             vs_fixed = percent_worse(mean_cost, fixed_cost)
 
+            # % more expensive than a perfect stop
             if label == "offline":
+                # each simulated session vs. its own oracle, then averaged
                 vs_hindsight = percent_worse(sessions.cost_s, sessions.orc_s).mean()
             else:
+                # real sessions have no oracle of their own: average vs. average oracle
                 vs_hindsight = percent_worse(mean_cost, hindsight_cost)
 
-            print(f"{mode:7} {label:8} {sessions.stop.median():8.0f} "
-                  f"{sessions.stop.mean():9.1f} {sessions.best.mean() / 1e3:8.2f} "
-                  f"{mean_cost:8.1f} {vs_fixed:12.1f}% {vs_hindsight:16.1f}%")
+            print(TABLE_ROW.format(
+                mode=mode,
+                label=label,
+                stop_median=sessions.stop.median(),
+                stop_mean=sessions.stop.mean(),
+                best_ms=sessions.best.mean() / US_PER_MS,
+                cost_s=mean_cost,
+                vs_fixed=vs_fixed,
+                vs_hindsight=vs_hindsight,
+            ))
     print()
 
 
@@ -201,12 +237,13 @@ def share_stopped_at_first_decision(sessions):
 
 
 def print_spread(real, offline):
+    # Spread per mode: stop percentiles, cost sd/se (real only), share that stopped at the first possible step.
     for mode in MODES:
         sessions = real[real["mode"] == mode]
         cost_sd = sessions.cost_s.std()
         cost_se = cost_sd / np.sqrt(len(sessions))
         print(mode, "REAL stop p10/p50/p90:", stop_percentiles(sessions),
-              " cost sd %.1f s, se %.2f s" % (cost_sd, cost_se),
+              f" cost sd {cost_sd:.1f} s, se {cost_se:.2f} s",
               f" stopped at first decision ({FIRST_DECISION_STEP}):",
               share_stopped_at_first_decision(sessions))
 
@@ -217,17 +254,20 @@ def print_spread(real, offline):
 
 
 def print_session_overview(real):
+    # Sanity check: sessions per mode, sessions not stopped by the library, median step overhead.
     sessions_per_mode = real.groupby("mode").size().to_dict()
     print("sessions per mode:", sessions_per_mode,
           " not ended by budget 0:", real.bad.sum())
-    print("per-step overhead median over sessions: %.0f us" % real.oh_med.median())
+    print(f"per-step overhead median over sessions: {real.oh_med.median():.0f} us")
 
 
 def main():
     real = read_real_sessions()
+    # merge them together into single .csv file (all 3000 of them if sessions_1000_v2)
     real.to_csv(os.path.join(SESSIONS_DIR, "..", "real_sessions.csv"), index=False)
     print_session_overview(real)
 
+    # Kernel time (us) of every config in the 5050 pool; offline sessions are drawn from it.
     pool = pd.read_csv(POOL_CSV)["Computation duration (us)"].values
     engine = Engine(ENGINE_LIBRARY)
     offline, oracle, mean_cost_curve = simulate(engine, pool)
