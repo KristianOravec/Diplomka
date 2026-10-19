@@ -30,8 +30,8 @@ US_PER_S = 1e6       # microseconds per second
 US_PER_MS = 1e3      # microseconds per millisecond
 
 # comparison table: header and rows share one layout, so the columns line up
-TABLE_HEADER = (f"{'mode':7} {'':8} {'stop med':>8} {'stop mean':>9} {'best ms':>8} "
-                f"{'cost s':>8} {'decl vs fixed':>13} {'decl vs hindsight':>17}")
+TABLE_HEADER = (f"{'mode':7} {'':8} {'TS med':>8} {'TS mean':>9} {'best ms':>8} "
+                f"{'cost s':>8} {'decl fixed %':>13} {'perf decline %':>17}")
 TABLE_ROW = ("{mode:7} {label:8} {stop_median:8.0f} {stop_mean:9.1f} {best_ms:8.2f} "
              "{cost_s:8.1f} {vs_fixed:12.1f}% {vs_hindsight:16.1f}%")
 
@@ -187,9 +187,9 @@ def print_comparison(real, offline, oracle, mean_cost_curve):
     fixed_cost = mean_cost_curve.min() / US_PER_S
     fixed_stop = mean_cost_curve.argmin() + 1
 
-    print(f"oracle: hindsight mean cost {hindsight_cost:.1f} s "
-          f"(mean stop {hindsight_stop:.0f}) | "
-          f"best FIXED stop {fixed_stop} -> {fixed_cost:.1f} s")
+    print(f"oracle (GT): mean cost {hindsight_cost:.1f} s "
+          f"(average GT TS {hindsight_stop:.0f}) | "
+          f"best fixed TS {fixed_stop} -> {fixed_cost:.1f} s")
     print()
 
     print(TABLE_HEADER)
@@ -237,7 +237,7 @@ def share_stopped_at_first_decision(sessions):
 
 
 def print_spread(real, offline):
-    # Spread per mode: stop percentiles, cost sd/se (real only), share that stopped at the first possible step.
+
     for mode in MODES:
         sessions = real[real["mode"] == mode]
         cost_sd = sessions.cost_s.std()
