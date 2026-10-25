@@ -2,6 +2,7 @@
 # Build everything that uses the C engine (src/*.c), from the same sources:
 #   ~/Diplomka/ClTuneGemm        the KTT binary (C engine + ClTuneGemm.cpp + KTT)
 #   ~/Diplomka/libevaluator.so   the library the Python scripts load (via 'make')
+#   ~/Diplomka/libtuner.so       the deployed tuner_api for Python (analyze.py)
 #
 # Override locations with env vars if needed:
 #   KTT_ROOT  (default ~/KTT)      CUDA_PATH  (default /usr/local/cuda)
@@ -73,6 +74,14 @@ build_python_library() {
     echo "built: $REPO/libevaluator.so"
 }
 
+build_tuner_library() {
+    local sources=""
+    for name in $C_SOURCES; do sources="$sources $REPO/src/$name.c"; done
+    gcc -O2 -fPIC -shared -fopenmp -std=gnu11 -I"$REPO/src" $sources -o "$REPO/libtuner.so" \
+        -lgsl -lgslcblas -llbfgs -lm || fail "building libtuner.so failed"
+    echo "built: $REPO/libtuner.so"
+}
+
 print_usage_example() {
     local kernels="$KTT_ROOT/Examples/ClTuneGemm"
     echo
@@ -88,4 +97,5 @@ check_requirements
 compile_c_engine
 link_binary
 build_python_library
+build_tuner_library
 print_usage_example

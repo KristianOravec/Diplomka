@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 
 SESSIONS_DIR = "results_5050/sessions_1000_v2"
-POOL_CSV = "raw-data/raw-autotuning-data/gemm-reduced/5050-gemm-reduced_output.csv"
-ENGINE_LIBRARY = "libevaluator.so"
+REFERENCE_CSV = "results_5050/ref_5050_run2/5050-reference_steps.csv"
+TUNER_LIBRARY = "libtuner.so"
 
 TOTAL_RUNS = 10000
 OVERHEAD_US = 68220
@@ -81,23 +81,73 @@ class CurveParams(ctypes.Structure):
                 ("c", ctypes.c_double)]
 
 
-class Engine:
+# Python copy of KernelConfig from src/tuner_api.h: same fields, same order, same types.
+class KernelConfig(ctypes.Structure):
+    _fields_ = [("total_kernel_runs", ctypes.c_uint64),
+                ("overhead", ctypes.c_uint64),
+                ("fit_start", ctypes.c_uint64),
+                ("mode", ctypes.c_int),               # TunerMode enum
+                ("k", ctypes.c_double),
+                ("hist_HW", ctypes.c_char_p),
+                ("file_name", ctypes.c_char_p),
+                ("hist_number_of_tests", ctypes.c_uint64)]
+
+
+# TunerMode values from tuner_api.h, and the k of each mode
+TUNER_MODES = {
+    "live":   {"mode": 0, "k": 1.0},
+    "hybrid": {"mode": 2, "k": 0.5},
+    "hist":   {"mode": 1, "k": 0.0},
+}
+
+
+class Tuner:
+    # The deployed tuner_api (libtuner.so), used exactly like ClTuneGemm uses it.
     def __init__(self, library_path):
         u64 = ctypes.c_uint64
         double = ctypes.c_double
         text = ctypes.c_char_p
+        handle = ctypes.c_void_p
 
         self.lib = ctypes.CDLL(os.path.abspath(library_path))
 
-        self.lib.recommend_tuning_length.restype = u64
-        self.lib.recommend_tuning_length.argtypes = [
-            u64, ctypes.POINTER(double), u64, u64, double, u64, u64, double, double]
+        self.lib.initiate_kernel.restype = handle
+        self.lib.initiate_kernel.argtypes = [ctypes.POINTER(KernelConfig), text, ctypes.c_void_p]
+        self.lib.push_result.argtypes = [handle, double, double]
+        self.lib.find_number_of_steps_that_should_be_tuning.restype = u64
+        self.lib.find_number_of_steps_that_should_be_tuning.argtypes = [handle]
+        self.lib.reset_kernel.argtypes = [handle]
+        self.lib.release_kernel.argtypes = [handle]
 
+        # only for printing O_hist and a, b
         self.lib.history_run.restype = u64
         self.lib.history_run.argtypes = [text, text, u64, u64, u64]
-
         self.lib.get_regression_params.argtypes = [
             text, text, u64, u64, u64, ctypes.POINTER(CurveParams)]
+
+    def create_handle(self, mode_name):
+        settings = TUNER_MODES[mode_name]
+        config = KernelConfig(
+            total_kernel_runs=TOTAL_RUNS,
+            overhead=OVERHEAD_US,
+            fit_start=FIT_START,
+            mode=settings["mode"],
+            k=settings["k"],
+            hist_HW=HISTORY_GPU,
+            file_name=HISTORY_FILE,
+            hist_number_of_tests=HISTORY_TESTS,
+        )
+        return self.lib.initiate_kernel(ctypes.byref(config), mode_name.encode(), None)
+
+    def stop_step(self, handle, kernels_us, totals_us):
+        # Push one step at a time and ask after every step, like ClTuneGemm.
+        # Returns the 1-based step where the library says stop (or the last step).
+        self.lib.reset_kernel(handle)
+        for step, (kernel, total) in enumerate(zip(kernels_us, totals_us), start=1):
+            self.lib.push_result(handle, kernel, total)
+            if self.lib.find_number_of_steps_that_should_be_tuning(handle) == 0:
+                return step
+        return len(kernels_us)
 
     def o_hist(self):
         return self.lib.history_run(
@@ -110,38 +160,33 @@ class Engine:
             ctypes.byref(curve))
         return curve
 
-    def stop_step(self, kernels, mode):
-        c_kernels = (ctypes.c_double * len(kernels))(*kernels)
-        last_index = self.lib.recommend_tuning_length(
-            mode["o_hist"], c_kernels, len(kernels), TOTAL_RUNS, mode["k"],
-            FIT_START, OVERHEAD_US, mode["hist_a"], mode["hist_b"])
-        return int(last_index) + 1
 
-
-def mode_settings(engine):
-    o_hist = engine.o_hist()
-    curve = engine.frozen_curve()
+def print_history(tuner):
+    o_hist = tuner.o_hist()
+    curve = tuner.frozen_curve()
     print(f"history (5050, OH={OVERHEAD_US}): O_hist={o_hist}  "
           f"a={curve.a:.3f} b={curve.b:.0f}")
 
-    no_history = -1.0
-    return {
-        "live":   {"k": 1.0, "o_hist": 0,      "hist_a": no_history, "hist_b": no_history},
-        "hybrid": {"k": 0.5, "o_hist": o_hist, "hist_a": no_history, "hist_b": no_history},
-        "hist":   {"k": 0.0, "o_hist": 0,      "hist_a": curve.a,    "hist_b": curve.b},
-    }
+
+def read_reference_sweep():
+    # Every config measured once on the GPU: its kernel time and its real per-step total.
+    # Step 1 is dropped: its overhead includes one-off setup.
+    sweep = pd.read_csv(REFERENCE_CSV).iloc[1:]
+    return sweep.kernel_us.values, sweep.total_us.values
 
 
-def cost_for_every_stop(kernels):
+def cost_for_every_stop(kernels, totals):
     # Total cost (us) of stopping after each step 1..N: tuning so far + (X - s) * best kernel so far.
+    # Tuning so far uses the measured per-step totals (kernel + real overhead).
     steps = np.arange(1, len(kernels) + 1)
-    tuning_us = np.cumsum(kernels + OVERHEAD_US)
+    tuning_us = np.cumsum(totals)
     best_so_far = np.minimum.accumulate(kernels)
     return total_cost_us(tuning_us, steps, best_so_far), best_so_far
 
 
-def simulate(engine, pool):
-    modes = mode_settings(engine)
+def simulate(tuner, sweep_kernels, sweep_totals):
+    print_history(tuner)
+    handles = {name: tuner.create_handle(name) for name in MODES}
     rng = np.random.default_rng(RANDOM_SEED)
 
     offline_rows = [] # one row per session and mode, 3000 in total.
@@ -150,8 +195,10 @@ def simulate(engine, pool):
 
     for _ in range(SIMULATED_SESSIONS):
         # one fake session: random configs without repeats, like KTT's random searcher
-        kernels = rng.choice(pool, CONFIGS_PER_SESSION, replace=False)
-        cost, best_so_far = cost_for_every_stop(kernels)
+        order = rng.choice(len(sweep_kernels), CONFIGS_PER_SESSION, replace=False)
+        kernels = sweep_kernels[order]
+        totals = sweep_totals[order]
+        cost, best_so_far = cost_for_every_stop(kernels, totals)
         summed_cost_curve += cost
 
         # oracle: best possible stop for this session, with hindsight
@@ -159,10 +206,10 @@ def simulate(engine, pool):
         oracle_stop = cost.argmin() + 1
         oracle_rows.append((oracle_cost, oracle_stop))
 
-        # Ask the C engine where each mode (live, hybrid, hist) would stop in this session,
+        # Ask the deployed tuner_api, step by step, where each mode (live, hybrid, hist) stops,
         # then store that stop, the best kernel found by then, its total cost and the oracle's cost.
-        for name, settings in modes.items():
-            stop = engine.stop_step(kernels, settings)
+        for name, handle in handles.items():
+            stop = tuner.stop_step(handle, kernels, totals)
             offline_rows.append({
                 "mode": name,
                 "stop": stop,
@@ -170,6 +217,9 @@ def simulate(engine, pool):
                 "cost_s": cost[stop - 1] / US_PER_S,
                 "orc_s": oracle_cost / US_PER_S,
             })
+
+    for handle in handles.values():
+        tuner.lib.release_kernel(handle)
 
     # average curve over all sessions; its minimum is the best fixed stop
     mean_cost_curve = summed_cost_curve / SIMULATED_SESSIONS
@@ -267,10 +317,10 @@ def main():
     real.to_csv(os.path.join(SESSIONS_DIR, "..", "real_sessions.csv"), index=False)
     print_session_overview(real)
 
-    # Kernel time (us) of every config in the 5050 pool; offline sessions are drawn from it.
-    pool = pd.read_csv(POOL_CSV)["Computation duration (us)"].values
-    engine = Engine(ENGINE_LIBRARY)
-    offline, oracle, mean_cost_curve = simulate(engine, pool)
+    # Kernel time and real per-step total (us) of every config; offline sessions are drawn from it.
+    sweep_kernels, sweep_totals = read_reference_sweep()
+    tuner = Tuner(TUNER_LIBRARY)
+    offline, oracle, mean_cost_curve = simulate(tuner, sweep_kernels, sweep_totals)
 
     print_comparison(real, offline, oracle, mean_cost_curve)
     print_spread(real, offline)
