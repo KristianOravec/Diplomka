@@ -113,8 +113,7 @@ static inline int evaluator_thread_id(void) {
 #endif
 }
 
-/* How many steps a simulated run should have, smallest of: total_kernel_runs,
- * the data size and hard cap (CURVE_LIMIT_MAX) */
+/* Session length = min(X, configs in the dataset, CURVE_LIMIT_MAX). */
 static inline uint64_t get_curve_limit(uint64_t total_kernel_runs,
                                        uint64_t data_size) {
     uint64_t max_steps =
@@ -122,12 +121,18 @@ static inline uint64_t get_curve_limit(uint64_t total_kernel_runs,
     return (max_steps < CURVE_LIMIT_MAX) ? max_steps : CURVE_LIMIT_MAX;
 }
 
-static inline double total_runtime_for_step(double cumulative_tuning_runtime,
+static inline double total_runtime_for_step(double tuning_time ,
                                             uint64_t step_idx,
                                             uint64_t overhead,
                                             double best_runtime_so_far,
                                             uint64_t total_kernel_runs) {
-    double tuning_cost = cumulative_tuning_runtime + (step_idx + 1) * overhead;
+    /* paper: T(x) = x * C_i + (#E - x) * pred(x), here with measured values:
+     *   x        = step_idx + 1               (kernels tried so far)
+     *   x * C_i  = cumulative_tuning_runtime + x * overhead
+     *   #E       = total_kernel_runs
+     *   pred(x)  = best_runtime_so_far        (real best, no prediction needed)
+     * running part uses #E - step_idx (one run more), same as Python -- see H1 */
+    double tuning_cost = tuning_time  + (step_idx + 1) * overhead;
     double running_cost = best_runtime_so_far * (total_kernel_runs - step_idx);
     return tuning_cost + running_cost;
 }
@@ -162,11 +167,7 @@ static void build_data_path(const char *hw, const char *file_name, char *path,
     snprintf(path, path_len, "raw-data/raw-autotuning-data/%s/%s-%s", benchmark,
              safe_hw, safe_file_name);
 }
-/*
-  get_x_cache -- returns a shared array [0, 1, 2, ..., CURVE_LIMIT_MAX-1] of
-  doubles, used as the x-axis (step numbers) when fitting curves. Built once on
-  first call and reused forever (the `static` locals persist across calls).
-*/
+/* Step numbers 0, 1, 2, ... as doubles: the x-axis for curve fitting. Filled once, then reused. */
 static double *get_x_cache(void) {
     static double x_cache[CURVE_LIMIT_MAX];
     static int initialized = 0;
@@ -180,7 +181,6 @@ static double *get_x_cache(void) {
 
     return x_cache;
 }
-
 /*
     workspace_init -- allocate the 2 scratch buffers for one thread's workspace.
 */
@@ -200,58 +200,31 @@ static void workspace_free(MonteCarloWorkspace *ws) {
     ws->best_configs = NULL;
 }
 
-/*
-    run_history_trial -- ONE trial of the "history" simulation
-
-    Draws curve_limit samples, tracks the best-so-far and cumulative cost, and
-    returns the step index where the COST MODEL is minimised (the oracle stop).
-    This is just the oracle half of a Monte Carlo test, with no estimator
-   involved.
-*/
+/* run_history_trial -- one random tuning run on the old GPU's data.
+ * Returns the step where stopping would have been cheapest (the oracle stop). */
 static uint64_t run_history_trial(const TuningData *data, uint64_t curve_limit,
                                   uint64_t total_kernel_runs, uint64_t overhead,
                                   uint64_t *rng_state) {
-    double cumsum = 0;
-    double best = 0; /* best (min) runtime so far */
-    double min_runtime = LARGE_RUNTIME_SENTINEL;
-    uint64_t crystal_idx = 0;
+    double tuning_time = 0;          /* sum of all kernels tried so far */
+    double best = 0;                 /* fastest kernel so far */
+    double lowest_cost = LARGE_RUNTIME_SENTINEL;
+    uint64_t best_stop = 0;
 
     for (uint64_t i = 0; i < curve_limit; i++) {
-        /* Draw a random runtime from the data (bootstrap sampling).
-         *
-         * SAMPLING NOTE (applies to every draw site in this file):
-         * This samples WITH replacement -- the same configuration can be drawn
-         * more than once in a run. The Python reference used pandas .sample(),
-         * which defaults to replace=False and therefore never repeats a
-         * configuration. Drawing 2000 from a pool of 5788 yields ~1690 distinct
-         * values here versus 2000 in Python.
-         *
-         * Measured effect on the average best-so-far curve: under 1% at every
-         * step (680 data, 300 tests), with the sign varying -- i.e. within
-         * noise. Kept as-is deliberately: sampling with replacement is standard
-         * bootstrap resampling, and switching would change every validated
-         * number in the project for a sub-1% difference.
-         *
-         * Do not "fix" this without re-running the full validation suite. */
-        double sample =
-            data->data[random_index_from_state(data->size, rng_state)];
-        cumsum += sample;
-        /* Update best-so-far: on the first step, or whenever we beat the
-         * record. */
+        /* random kernel, WITH replacement (Python doesn't repeat) */
+        double sample = data->data[random_index_from_state(data->size, rng_state)];
+        tuning_time += sample;
         if (i == 0 || sample < best)
             best = sample;
 
-        /* Evaluate the cost model at this step. */
-        double total = total_runtime_for_step(cumsum, i, overhead, best,
-                                              total_kernel_runs);
-        /* Track the step with the lowest cost = the oracle's best stopping
-         * point. */
-        if (total < min_runtime) {
-            min_runtime = total;
-            crystal_idx = i;
+        /* cost if we stopped here: tuning so far + the remaining runs at the best speed */
+        double cost = total_runtime_for_step(tuning_time, i, overhead, best, total_kernel_runs);
+        if (cost < lowest_cost) {
+            lowest_cost = cost;
+            best_stop = i;
         }
     }
-    return crystal_idx;
+    return best_stop;
 }
 
 /*
@@ -522,79 +495,28 @@ uint64_t history_run(const char *HW, const char *file_name,
            1;
 }
 
-/*
- * get_regression_params() - Fit regression parameters from historical data
- *
- * Python equivalent: evaluator.get_history_regression_parameters()
- * (python/evaluator.py lines 60-101)
- *
- * 1. Loads historical data (lines 61-68 in Python)
- * 2. Runs multiple tests computing average best_so_far curve (lines 74-91 in
- * Python)
- * 3. Fits curve to average (lines 93-97 in Python)
- * 4. Returns a, b parameters (lines 99-101 in Python)
- */
-/* =============================================================================
- * get_regression_params -- learn the SHAPE of the convergence curve on one
- * piece of hardware, so it can be frozen and reused on another (k=0 mode).
- *
- * THE IDEA
- *   A single simulated tuning run produces a jagged, luck-dependent best-so-far
- *   curve. Averaging many runs point-by-point gives one smooth curve that is
- *   representative of this hardware. We fit f(x) = b/x^a + c to THAT average.
- *   The caller keeps a and b -- the shape -- and transplants them onto a
- *   different GPU, refitting only the floor c against live data. That is the
- *   "frozen curve" of the historical mode.
- *
- * WHY AVERAGE FIRST, THEN FIT (rather than fit each run and average the a,b,c)
- *   Fitting noisy single-run data yields unstable parameters, and the occasional
- *   wild fit would skew the mean. Averaging the DATA first produces a smooth,
- *   well-behaved curve that fits cleanly -- one robust fit beats a thousand
- *   shaky ones.
- *
- *   HW              : [in]  historical hardware id, e.g. "1070".
- *   file_name       : [in]  data file, e.g. "gemm-reduced_output.csv".
- *   total_kernel_runs:[in]  #E, only used to cap the curve length.
- *   fit_start       : [in]  skip this many noisy warmup points before fitting.
- *   number_of_tests : [in]  how many runs to average (typically 1000).
- *   params          : [out] receives the fitted a, b, c. On ANY failure this is
- *                           filled with neutral defaults (a=0.5, b=1, c=0) and
- *                           the function returns early -- callers get usable
- *                           values rather than garbage.
- *
- * Mirrors Python's get_history_regression_parameters(); the "Lines NN" comments
- * below refer to that function.
- * ============================================================================= */
+/* Default curve when the historical data can't be used. */
+static void use_default_params(CurveParams *params) {
+    params->a = 0.5;
+    params->b = 1.0;
+    params->c = 0;
+}
+
+/* get_regression_params -- shape of the convergence curve on historical hardware.
+ * Averages the best-so-far curve over number_of_tests simulated runs, then fits
+ * f(x) = b/x^a + c to that average. Hist mode freezes a, b; c is refit live.
+ * Python: evaluator.get_history_regression_parameters(). */
 void get_regression_params(const char *HW, const char *file_name,
                            uint64_t total_kernel_runs, uint64_t fit_start,
                            uint64_t number_of_tests, CurveParams *params) {
-    /* ---- load the historical hardware's measured runtimes ---- */
     char path[512];
     build_data_path(HW, file_name, path, sizeof(path));
     TuningData data = csv_load(path, "Computation duration (us)");
 
-    /* If any problem, return default params (a=0.5,b=1,c=0)*/
-    if (!data.data || data.size == 0) {
+    uint64_t curve_limit = data.data ? get_curve_limit(total_kernel_runs, data.size) : 0;
+    if (curve_limit == 0 || number_of_tests == 0) {
         csv_free(&data);
-        params->a = 0.5;
-        params->b = 1.0;
-        params->c = 0;
-        return;
-    }
-    uint64_t curve_limit = get_curve_limit(total_kernel_runs, data.size);
-    if (curve_limit == 0) {
-        csv_free(&data);
-        params->a = 0.5;
-        params->b = 1.0;
-        params->c = 0;
-        return;
-    }
-
-    if (number_of_tests == 0) {
-        csv_free(&data);
-        params->a = 0.5;
-        params->b = 1.0;
-        params->c = 0;
+        use_default_params(params);
         return;
     }
 
@@ -604,79 +526,35 @@ void get_regression_params(const char *HW, const char *file_name,
         free(avg_curve);
         free(tuning_run);
         csv_free(&data);
-        params->a = 0.5;
-        params->b = 1.0;
-        params->c = 0;
+        use_default_params(params);
         return;
     }
 
-    /* ---- build the AVERAGE convergence curve over `number_of_tests` runs ----
-     * avg_curve[j] ends up holding the mean best-so-far runtime at step j,
-     * averaged across every simulated run. */
+    /* avg_curve[j] = mean best-so-far at step j over all runs */
     for (uint64_t test = 0; test < number_of_tests; test++) {
-        /* Lines 77-78 in Python: draw one synthetic tuning run.
-         * With replacement -- see the SAMPLING NOTE earlier in this file.
-         *
-         * Per-test SALTED seed, same scheme as history_run and the main
-         * evaluator loop. Previously this drew from the shared global GSL RNG
-         * (random.c), whose state advances across calls -- so identical inputs
-         * returned different parameters depending on how many prior calls the
-         * process had made (pure execution-order dependence). Seeding each
-         * trial from (test, REGRESSION_SEED_SALT) makes the result a pure
-         * function of the inputs: reproducible, order-independent, and
-         * thread-safe by construction. */
+        /* one random run, own seed per test (reproducible, thread-safe) */
         uint64_t rng_state = make_test_seed(test, REGRESSION_SEED_SALT);
         for (uint64_t i = 0; i < curve_limit; i++)
-            tuning_run[i] =
-                data.data[random_index_from_state(data.size, &rng_state)];
+            tuning_run[i] = data.data[random_index_from_state(data.size, &rng_state)];
 
-        /* Lines 84-91 in Python: fold this run's best-so-far curve into the
-         * running average. The incremental mean
-         *     new_avg = (old_avg * test + value) / (test + 1)
-         * lets us average all runs without storing them: `test` is the count of
-         * runs already folded in, `test + 1` the count including this one.
-         * (avg_curve was calloc'd to zero, so on test 0 this reduces to
-         * new_avg = value -- which is why no special first-iteration branch is
-         * needed here, unlike the Python.) */
+        /* running mean: new = (old * test + value) / (test + 1) */
         avg_curve[0] = (avg_curve[0] * test + tuning_run[0]) / (test + 1);
-        double running_min = tuning_run[0]; /* best seen so far in THIS run */
+        double running_min = tuning_run[0];
         for (uint64_t j = 1; j < curve_limit; j++) {
+            /* Formula, I often forgot:
+            /* new average = (old average × runs so far + new value) / (runs so far + 1) */
             if (tuning_run[j] < running_min)
-                running_min = tuning_run[j]; /* the curve only ever descends */
+                running_min = tuning_run[j];
             avg_curve[j] = (avg_curve[j] * test + running_min) / (test + 1);
         }
     }
 
-    /* ---- fit f(x) = b/x^a + c to the averaged curve ----
-     * Lines 93-97 in Python (scipy.optimize.curve_fit).
-     *
-     * WHY NO_HISTORICAL_DATA HERE, EVEN THOUGH THIS IS THE HISTORICAL FIT:
-     * the two "historical" names mean different things.
-     *   TUNER_MODE_HISTORICAL = what the tuner does LATER (reuse a frozen curve)
-     *   NO_HISTORICAL_DATA    = "this particular call has no a,b to freeze"
-     * This function is what CREATES the frozen curve, so it must fit from
-     * scratch -- there is nothing to inherit yet. Both sentinels therefore
-     * select curve_fit's "fit everything" mode: a, b AND c all come out of the
-     * Levenberg-Marquardt fit.
-     *
-     * The a,b produced here are stored as hist_a/hist_b by initiate_kernel and
-     * passed back into curve_fit on every live tuning step -- that later call
-     * DOES supply them, selecting the frozen-curve mode. Same function, opposite
-     * arguments: once to MAKE the curve, once to USE it.
-     *
-     * NOTE: a, b, c are pure OUTPUT parameters -- curve_fit overwrites them in
-     * every mode and never reads the values passed in. The initialisers below
-     * are therefore redundant; they merely duplicate the starting guesses
-     * curve_fit already uses internally (CURVEFIT_INITIAL_DECAY,
-     * CURVEFIT_INITIAL_SCALE, and the last point of the curve for c). Kept only
-     * so the declaration reads as a complete statement of intent. */
+    /* fit all of a, b, c (nothing frozen yet: this call creates the frozen curve) */
     double *x_cache = get_x_cache();
     double a = 0.5, b = 1.0, c = avg_curve[curve_limit - 1];
     curve_fit(x_cache, avg_curve, curve_limit, fit_start, &a, &b, &c,
               NO_HISTORICAL_DATA, NO_HISTORICAL_DATA);
 
-    /* Hand back all three, though callers typically use only a and b (the
-     * shape); c is refit against live data on the target hardware. */
     params->a = a;
     params->b = b;
     params->c = c;
