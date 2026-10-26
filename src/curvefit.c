@@ -156,28 +156,12 @@ static void curve_fit_lm(double *x, double *y, uint64_t n, double *a, double *b,
     gsl_set_error_handler(old_handler);
 }
 
-/*
-    [in] x         : x-values (step numbers), length n.
-    [in] y         : y-values (best-so-far runtimes), length n
-    [in] n         : number of points
-    [in] fit_start : index to begin fitting from
-    [out] a,b,c     : the fitted curve parameters.
-    [in]  hist_a    : historical decay, or NO_HISTORICAL_DATA (-1) for "none".
-    [in]  hist_b    : historical scale, or -1 for "none".
-
-    MODES:
-      hist_a<0 & hist_b<0 -> fit all three a,b,c live      (k=1 live).
-      hist_a>0 & hist_b>0 -> freeze a,b to the historical values, fit only c
-                             (k=0 historical: the "frozen curve").
-    returns: nothing (results via a,b,c).
-*/
+/* curve_fit -- fit y = b / x^a + c to points (x[i], y[i]), skipping the first fit_start.
+ *   hist_a, hist_b = -1     : fit a, b, c freely (live, hybrid, and building hist's shape)
+ *   hist_a, hist_b real     : keep that shape, fit only c (hist during tuning) */
 void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
                double *b, double *c, double hist_a, double hist_b) {
-    /* How many points we'll actually fit. */
-    uint64_t fit_n = n - fit_start;
-
-    /* MODE 1 -- nothing to fit (fit_start == n). Return sensible defaults and
-     * use the last observed value as the floor c. */
+    /* too few points to fit: default shape, floor = current best */
     if (n <= fit_start) {
         *a = CURVEFIT_INITIAL_DECAY;
         *b = CURVEFIT_INITIAL_SCALE;
@@ -185,29 +169,26 @@ void curve_fit(double *x, double *y, uint64_t n, uint64_t fit_start, double *a,
         return;
     }
 
-    /* MODE 2 -- historical parameters provided: reuse a and b, only solve for
-     * c. c is chosen as the average vertical offset between the data and the
-     * fixed historical curve b/x^a over the fitted range. */
+    uint64_t fit_n = n - fit_start; /* points actually fitted */
+
+    /* frozen shape: only shift it up/down onto the points */
     if (hist_a > 0 && hist_b > 0) {
         *a = hist_a;
         *b = hist_b;
 
-        double sum = 0;
+        double gap_sum = 0;
         for (uint64_t i = fit_start; i < n; i++)
-            sum += y[i] - hist_b / pow(x[i], hist_a);
-        *c = sum / (n - fit_start);
+            gap_sum += y[i] - hist_b / pow(x[i], hist_a);
+        *c = gap_sum / fit_n;    /* best shift = mean distance from the shape */
         return;
     }
 
-    /* MODE 3 -- full fit from scratch using Levenberg-Marquardt.
-     * Start from default guesses; c starts at the last observed value. */
-    double a_val = CURVEFIT_INITIAL_DECAY, b_val = CURVEFIT_INITIAL_SCALE,
-           c_val = y[n - 1];
-    curve_fit_lm(x + fit_start, y + fit_start, fit_n, &a_val, &b_val, &c_val);
-
-    *a = a_val;
-    *b = b_val;
-    *c = c_val;
+    /* no frozen shape: fit a, b, c freely
+     * (live/hybrid every step, and once offline to build hist's a, b) */
+    *a = CURVEFIT_INITIAL_DECAY;
+    *b = CURVEFIT_INITIAL_SCALE;
+    *c = y[n - 1];
+    curve_fit_lm(x + fit_start, y + fit_start, fit_n, a, b, c);
 }
 
 double curve_eval(double x, double a, double b, double c) {
