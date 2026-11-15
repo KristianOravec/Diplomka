@@ -8,9 +8,12 @@
 // Usage:
 //   ./ClTuneGemm [platform] [device] [kernelFile] [refKernelFile] <X>
 //                [mode: live|hybrid|hist|ref] [histHW] [fast] [overhead_us]
-//                [fit_start]
+//                [fit_start] [probe]
 //   e.g. ./ClTuneGemm 0 0 ClTuneGemm.cu ClTuneGemmReference.cu 10000 hybrid 5050 fast 68220
 //
+//   probe : overtune probe -- do not stop when the library says stop; keep tuning
+//           until kProbeSteps, log the first budget-0 step and raw_est every step.
+//           e.g. ... 10000 live 5050 - 68220 10 probe
 //   ref   : random search for X steps without the library; histHW = GPU name,
 //           writes <gpu>-gemm-reduced_output.csv and <gpu>-reference_steps.csv
 //   fast  : stop right after tuning stops (production cost is computed offline)
@@ -57,6 +60,14 @@ const bool useProfiling = false;
 // Reduced tuning parameters set, taken from CLTune.
 const bool useReducedSet = true;
 
+// probe mode: tuning steps per session (the library's stop is only logged)
+const uint64_t kProbeSteps = 300;
+
+// GEMM tuning parameters, in the order of Jarda's pool CSV
+const std::vector<std::string> kParameterNames = {
+    "MWG", "NWG", "KWG", "MDIMC", "NDIMC", "MDIMA", "NDIMB", "KWI",
+    "VWM", "VWN", "STRM", "STRN", "SA", "SB", "PRECISION"};
+
 // Helper function to determine whether or not 'a' is a multiple of 'b'
 bool IsMultiple(const size_t a, const size_t b)
 {
@@ -96,18 +107,28 @@ std::string GetParameterValue(const ktt::KernelConfiguration& config, const std:
     return "";
 }
 
+// One configuration as a short key, e.g. "64-32-32-16-8-...": its parameter values
+// joined by '-' (no commas, so it fits in one CSV column; matches the pool CSV columns).
+std::string ConfigKey(const ktt::KernelConfiguration& config)
+{
+    std::string key;
+    for (const auto& name : kParameterNames)
+    {
+        if (!key.empty())
+            key += "-";
+        key += GetParameterValue(config, name);
+    }
+    return key;
+}
+
 // Write all results as a pool CSV in Jarda's <GPU>-gemm-reduced_output.csv layout.
 void WritePoolCsv(const std::string& path, const std::vector<ktt::KernelResult>& results)
 {
-    static const std::vector<std::string> parameterNames = {
-        "MWG", "NWG", "KWG", "MDIMC", "NDIMC", "MDIMA", "NDIMB", "KWI",
-        "VWM", "VWN", "STRM", "STRN", "SA", "SB", "PRECISION"};
-
     std::ofstream pool(path);
 
     // header
     pool << "Kernel name,Computation duration (us),Global size,Local size";
-    for (const auto& name : parameterNames)
+    for (const auto& name : kParameterNames)
         pool << "," << name;
     pool << ",Maximum work-group size,Local memory size,Private memory size,"
             "Constant memory size,Registers count\n";
@@ -122,7 +143,7 @@ void WritePoolCsv(const std::string& path, const std::vector<ktt::KernelResult>&
              << run.GetGlobalSize().GetTotalSize() << ","
              << run.GetLocalSize().GetTotalSize();
 
-        for (const auto& name : parameterNames)
+        for (const auto& name : kParameterNames)
             pool << "," << GetParameterValue(result.GetConfiguration(), name);
 
         if (run.HasCompilationData())
@@ -243,6 +264,8 @@ int main(int argc, char** argv)
     // live decisions use the measured per-step cost
     const uint64_t cfgOverhead = (argc >= 10) ? std::stoull(std::string(argv[9])) : 0;
     const uint64_t fitStart = (argc >= 11) ? std::stoull(std::string(argv[10])) : 10;
+    // probe: keep tuning after the library's stop (overtune probe), see kProbeSteps
+    const bool probeMode = (argc >= 12 && std::string(argv[11]) == "probe");
     // matrix size is part of the output name (results of different sizes don't mix)
     constexpr uint32_t kMatSize = useProfiling ? 4096 / 2 : 4096;
     // tuning_steps_<X>_<mode>_hist<hw>_rand_n<size>_fs<fit_start>[_fast][_oh<us>].csv
@@ -252,6 +275,7 @@ int main(int argc, char** argv)
                     + "_fs" + std::to_string(fitStart);
     if (fastMode) tag += "_fast";
     if (cfgOverhead > 0) tag += "_oh" + std::to_string(cfgOverhead);
+    if (probeMode) tag += "_probe";
     // ref mode: the 7th argument names the GPU being measured (e.g. 5050);
     // outputs are <gpu>-gemm-reduced_output.csv (Jarda's layout) and
     // <gpu>-reference_steps.csv
@@ -296,7 +320,7 @@ int main(int argc, char** argv)
               << " hist=" << histHW << " searcher=rand"
               << " n=" << kMatSize << " fit_start=" << fitStart
               << " overhead_us=" << cfgOverhead
-              << (fastMode ? " fast" : "") << "\n";
+              << (fastMode ? " fast" : "") << (probeMode ? " probe" : "") << "\n";
 
     uint32_t kSizeM;
     uint32_t kSizeN;
@@ -488,25 +512,28 @@ int main(int argc, char** argv)
     double failedWallUs = 0.0;  // time of failed configs (not seen by the library)
     const uint64_t failureCap = 1000;
     bool tuning = true;
+    uint64_t shadowStop = 0;    // probe: first step where the library said stop (0 = never)
     ktt::KernelConfiguration bestConfiguration{};
 
     std::ofstream stepLog("tuning_steps_" + tag + ".csv");
-    stepLog << "step,kernel_us,overhead_us,total_us,new_best,budget,raw_est\n";
+    stepLog << "step,kernel_us,overhead_us,total_us,new_best,budget,raw_est,config\n";
     double bestKernelUs = std::numeric_limits<double>::infinity();
 
     // step 1 is held back and pushed at step 2 (see below)
     bool havePending = false;
     double pendingKernelUs = 0.0;
     double pendingWallUs = 0.0;
+    std::string pendingConfig;
 
     // ask the library once per push, log one CSV row, return the budget
     // (raw_est = fresh estimate that ignores the stop latch)
-    auto logRow = [&](uint64_t step, double kUs, double ohUs) -> uint64_t
+    auto logRow = [&](uint64_t step, double kUs, double ohUs, const std::string& config) -> uint64_t
     {
         const uint64_t budget = find_number_of_steps_that_should_be_tuning(handle);
         const uint64_t rawEst = tuner_raw_recommendation(handle);
         stepLog << step << "," << kUs << "," << ohUs << "," << kUs + ohUs << ","
-                << (kUs < bestKernelUs ? 1 : 0) << "," << budget << "," << rawEst << "\n";
+                << (kUs < bestKernelUs ? 1 : 0) << "," << budget << "," << rawEst << ","
+                << config << "\n";
         if (kUs < bestKernelUs)
             bestKernelUs = kUs;
         std::cout << "step " << step << ": kernel " << kUs << " us, overhead "
@@ -516,6 +543,9 @@ int main(int argc, char** argv)
 
     while (runsDone < totalRuns)
     {
+        if (probeMode && tuningSteps >= kProbeSteps)
+            break;   // probe: enough steps, end the session
+
         if (tuning)
         {
             const TimedStep timed = RunTimedStep(tuner, kernel);
@@ -534,6 +564,7 @@ int main(int argc, char** argv)
             }
             const double kernelTimeUs = timed.kernelUs;
             const double overheadUs = wallUs - kernelTimeUs;
+            const std::string config = ConfigKey(timed.result.GetConfiguration());
             ++runsDone;
             ++tuningSteps;
             tuningResults.push_back(timed.result);
@@ -545,18 +576,29 @@ int main(int argc, char** argv)
                 havePending = true;
                 pendingKernelUs = kernelTimeUs;
                 pendingWallUs = wallUs;
+                pendingConfig = config;
                 continue;
             }
             if (havePending)
             {
                 push_result(handle, pendingKernelUs, pendingKernelUs + overheadUs);
-                (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs);
+                (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs, pendingConfig);
                 havePending = false;
             }
             push_result(handle, kernelTimeUs, wallUs);
-            const uint64_t remainingBudget = logRow(tuningSteps, kernelTimeUs, overheadUs);
+            const uint64_t remainingBudget = logRow(tuningSteps, kernelTimeUs, overheadUs, config);
 
-            if (remainingBudget == 0)
+            if (remainingBudget == 0 && probeMode)
+            {
+                // probe: note where the library stopped, but keep tuning
+                if (shadowStop == 0)
+                {
+                    shadowStop = tuningSteps;
+                    std::cout << "probe: library said stop at step " << shadowStop
+                              << ", continuing to " << kProbeSteps << "\n";
+                }
+            }
+            else if (remainingBudget == 0)
             {
                 tuning = false;
                 bestConfiguration = tuner.GetBestConfiguration(kernel);
@@ -581,8 +623,14 @@ int main(int argc, char** argv)
     if (havePending)
     {
         push_result(handle, pendingKernelUs, pendingWallUs);
-        (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs);
+        (void)logRow(1, pendingKernelUs, pendingWallUs - pendingKernelUs, pendingConfig);
         havePending = false;
+    }
+
+    if (probeMode)
+    {
+        std::cout << "probe done: " << tuningSteps << " steps, library stop at step "
+                  << shadowStop << " (0 = never)\n";
     }
 
     if (tuning)
